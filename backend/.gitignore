@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual envs
+.venv/
+venv/
+
+# Local cache
+.cache/
+*.log
+
+# Local DB / secrets
+*.sqlite3
+*.db
+.env
+.env.*
