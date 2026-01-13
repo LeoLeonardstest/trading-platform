@@ -1,5 +1,4 @@
-"""
-shared/strategy_specs.py
+"""shared/strategy_specs.py
 
 Minimal shared strategy metadata.
 
@@ -10,10 +9,19 @@ Purpose:
   - Allowed parameters, ranges, defaults, examples
   - Symbol list rules (e.g., Mean Reversion universe 20–50)
 
-Design:
+This file is intentionally simple:
 - plain dictionaries
-- no Alpaca/Yahoo code
+- no classes
+- no Alpaca code
 - no database code
+
+Used by:
+- UI (render fields + examples)
+- Backtest runner (validate config)
+- Live bot runner (validate config)
+
+Parameter key naming rule:
+- The keys defined here MUST match what your live/backtest strategies read.
 """
 
 from __future__ import annotations
@@ -21,10 +29,10 @@ from __future__ import annotations
 from typing import Dict, List, Literal, Optional, TypedDict
 
 
-# Canonical timeframes exposed to UI and stored in BotConfig.strategy.params["timeframe"].
-# Each runtime maps this value:
-# - Live (Alpaca): maps to "1Min/5Min/.../1Hour/1Day"
-# - Backtest (Yahoo): maps to "1m/5m/.../1h/1d"
+# -----------------------------
+# Common options
+# -----------------------------
+
 TIMEFRAMES: List[str] = [
     "1Min",
     "5Min",
@@ -32,8 +40,18 @@ TIMEFRAMES: List[str] = [
     "30Min",
     "1H",
     "1D",
+    "2D",
+    "3D",
+    "4D",
+    "5D",
+    "1W",
+    "1M",
 ]
 
+
+# -----------------------------
+# TypedDicts (optional typing help; safe to ignore)
+# -----------------------------
 
 ParamType = Literal["int", "float", "str", "bool"]
 
@@ -69,6 +87,10 @@ class StrategySpec(TypedDict):
     params: Dict[str, ParamSpec]
 
 
+# -----------------------------
+# Strategy Specs
+# -----------------------------
+
 STRATEGY_SPECS: Dict[str, StrategySpec] = {
     "mean_reversion_losers": {
         "id": "mean_reversion_losers",
@@ -81,6 +103,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         "min_symbols": 20,
         "max_symbols": 50,
         "params": {
+            # Universe size is derived from len(symbols). Do NOT store universe_size separately.
             "losers_to_buy": {
                 "type": "int",
                 "description": "How many of the worst-performing stocks to buy each day.",
@@ -92,7 +115,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
             },
             "timeframe": {
                 "type": "str",
-                "description": "Decision timeframe (daily is typical for this strategy).",
+                "description": "Decision timeframe for calculations (daily is typical).",
                 "required": True,
                 "allowed": ["1D"],
                 "default": "1D",
@@ -188,7 +211,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         "name": "RSI Mean Reversion",
         "description": (
             "Mean-reversion strategy using RSI extremes. "
-            "Buy when RSI <= oversold; exit when RSI >= overbought or risk rules trigger."
+            "Buy when RSI <= oversold; sell/exit when RSI >= overbought or risk rules trigger."
         ),
         "symbols_role": "symbols",
         "min_symbols": 1,
@@ -281,7 +304,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
             },
             "signal_period": {
                 "type": "int",
-                "description": "Signal EMA period.",
+                "description": "Signal line EMA period.",
                 "required": True,
                 "min": 2,
                 "max": 100,

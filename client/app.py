@@ -33,7 +33,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-
+from datetime import datetime, timezone
 from client.api import ApiClient
 
 # Optional: render equity curve using matplotlib
@@ -150,50 +150,41 @@ class MainLayout(tk.Frame):
     def __init__(self, parent, app: TradingApp):
         super().__init__(parent)
         self.app = app
-
         self._build_header()
         self._build_body()
 
     def _build_header(self):
         header = tk.Frame(self, bg="#2c3e50", height=50)
         header.pack(fill=tk.X)
-
         tk.Label(
-            header,
-            text=APP_TITLE,
-            fg="white",
-            bg="#2c3e50",
-            font=("Arial", 14, "bold"),
+            header, text=APP_TITLE, fg="white", bg="#2c3e50", font=("Arial", 14, "bold")
         ).pack(side=tk.LEFT, padx=15)
-
         tk.Button(header, text="Logout", command=self.logout).pack(side=tk.RIGHT, padx=10)
-        tk.Label(header, text=f"User: {self.app.user}", fg="white", bg="#2c3e50").pack(
-            side=tk.RIGHT, padx=10
-        )
+        tk.Label(header, text=f"User: {self.app.user}", fg="white", bg="#2c3e50").pack(side=tk.RIGHT, padx=10)
 
     def logout(self):
         self.app.user = None
+        self.app.api.token = None
         self.app.show_login()
 
     def _build_body(self):
         body = tk.Frame(self)
         body.pack(fill=tk.BOTH, expand=True)
 
+        # Sidebar Navigation
         nav = tk.Frame(body, width=220, bg="#ecf0f1")
         nav.pack(side=tk.LEFT, fill=tk.Y)
+        
+        btn_config = {"width": 24, "pady": 6}
+        tk.Button(nav, text="Home", command=self.show_home, **btn_config).pack()
+        tk.Button(nav, text="Test (Backtest)", command=self.show_test, **btn_config).pack()
+        tk.Button(nav, text="Live Bots", command=self.show_bots, **btn_config).pack()
+        tk.Button(nav, text="History", command=self.show_history, **btn_config).pack()
+        tk.Button(nav, text="Settings", command=self.show_settings, **btn_config).pack()
 
-        for text, cmd in [
-            ("Home", self.show_home),
-            ("Test", self.show_test),
-            ("Bots", self.show_bots),
-            ("History", self.show_history),
-            ("Settings", self.show_settings),
-        ]:
-            tk.Button(nav, text=text, width=24, command=cmd).pack(pady=6)
-
+        # Content Area
         self.content = tk.Frame(body)
         self.content.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
         self.show_home()
 
     def clear_content(self):
@@ -201,40 +192,90 @@ class MainLayout(tk.Frame):
             w.destroy()
 
     # -----------------------------
-    # Home (Dashboard)
+    # 1. REAL DASHBOARD
     # -----------------------------
     def show_home(self):
         self.clear_content()
         tk.Label(self.content, text="Dashboard", font=("Arial", 20)).pack(pady=14)
 
-        cards = tk.Frame(self.content)
-        cards.pack(pady=10)
+        # 1. Fetch Real Data
+        try:
+            dash_data = self.app.api.get_dashboard()  #
+            # Dashboard returns: { "account": {...}, "bots_total": int, "bots_running": int }
+            
+            # Helper to safely get nested account data
+            acct = dash_data.get("account") or {}
+            if "error" in acct:
+                cash = "Error"
+                equity = acct["error"]
+                bp = "Error"
+            else:
+                cash_val = acct.get("cash", 0.0)
+                eq_val = acct.get("portfolio_value", 0.0)
+                bp_val = acct.get("buying_power", 0.0)
+                
+                cash = f"${float(cash_val):,.2f}"
+                equity = f"${float(eq_val):,.2f}"
+                bp = f"${float(bp_val):,.2f}"
 
-        for title, value in [
-            ("Alpaca Account Balance", "$12,345"),
-            ("Running Bots", "3"),
-            ("Total Profit", "+$1,240"),
-            ("Today PnL", "+$120"),
-        ]:
-            card = tk.LabelFrame(cards, text=title, width=260, height=90)
+            running_count = str(dash_data.get("bots_running", 0))
+            total_bots = str(dash_data.get("bots_total", 0))
+
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to fetch dashboard: {e}")
+            return
+
+        # 2. Render Cards
+        cards_frame = tk.Frame(self.content)
+        cards_frame.pack(pady=10)
+
+        metrics = [
+            ("Cash", cash),
+            ("Portfolio Value", equity),
+            ("Buying Power", bp),
+            ("Active / Total Bots", f"{running_count} / {total_bots}"),
+        ]
+
+        for title, value in metrics:
+            card = tk.LabelFrame(cards_frame, text=title, width=240, height=90)
             card.pack(side=tk.LEFT, padx=10)
             card.pack_propagate(False)
-            tk.Label(card, text=value, font=("Arial", 16, "bold")).pack(expand=True)
+            tk.Label(card, text=value, font=("Arial", 16, "bold"), fg="#27ae60").pack(expand=True)
 
-        tk.Label(self.content, text="Running Bots (placeholder)", font=("Arial", 12, "bold")).pack(
-            pady=(18, 6)
-        )
-        bots_box = tk.Text(self.content, height=14, width=125)
-        bots_box.insert(
-            "1.0",
-            "BotID | Strategy | Status | PnL\n"
-            "------------------------------------------------------------\n"
-            "b1    | moving_average | RUNNING | +$45\n"
-            "b2    | rsi_reversion   | STOPPED | +$10\n",
-        )
-        bots_box.config(state=tk.DISABLED)
-        bots_box.pack(padx=12)
+        # 3. Real Running Bots List
+        tk.Label(self.content, text="Active Bot Instances", font=("Arial", 12, "bold")).pack(pady=(20, 5))
+        
+        # We need a Treeview to show the bots cleanly
+        columns = ("name", "strategy", "status", "pnl")
+        tree = ttk.Treeview(self.content, columns=columns, show="headings", height=8)
+        tree.heading("name", text="Bot Name")
+        tree.heading("strategy", text="Strategy")
+        tree.heading("status", text="Status")
+        tree.heading("pnl", text="Capital") # Using capital as proxy for now, PnL requires calculation
+        
+        tree.column("name", width=150)
+        tree.column("strategy", width=150)
+        tree.column("status", width=100)
+        tree.column("pnl", width=100)
+        tree.pack(fill=tk.X, padx=20)
 
+        # Fetch full bot list to populate this table
+        try:
+            all_bots = self.app.api.list_bots() #
+            # Filter for running/starting/stopping
+            active_statuses = ["running", "starting", "stopping", "sleeping"]
+            
+            for b in all_bots:
+                status = str(b.get("status", "")).lower()
+                if status in active_statuses:
+                    tree.insert("", "end", values=(
+                        b.get("name", "Unnamed"),
+                        b.get("strategy_id", ""),
+                        b.get("status", "").upper(),
+                        f"${b.get('capital', 0):,.2f}"
+                    ))
+        except Exception:
+            pass # Fail silently for the list if dashboard loaded
     # -----------------------------
     # Test (Backtesting)
     # -----------------------------
@@ -442,7 +483,11 @@ class MainLayout(tk.Frame):
 
             sid = self.bt_strategy.get().strip()
             symbols = parse_symbols(self.bt_symbols.get())
-            capital = float(self.bt_capital.get().strip())
+            cap_text = self.bt_capital.get().strip()
+            try:
+                capital = float(cap_text)
+            except ValueError:
+                raise ValueError(f"Initial Capital must be a number, got: {cap_text!r}")
             start = parse_date(self.bt_start.get().strip(), "%Y-%m-%d")
             end = parse_date(self.bt_end.get().strip(), "%Y-%m-%d")
 
@@ -511,242 +556,330 @@ class MainLayout(tk.Frame):
                 self.canvas.draw()
 
     # -----------------------------
-    # Bots (Live)
+    # 3. REAL BOTS PAGE (Management)
     # -----------------------------
     def show_bots(self):
         self.clear_content()
-        tk.Label(self.content, text="Live Bots (Server)", font=("Arial", 20)).pack(pady=12)
+        tk.Label(self.content, text="Live Bots Management", font=("Arial", 20)).pack(pady=12)
 
-        create = tk.LabelFrame(self.content, text="Create / Start Bot")
-        create.pack(fill=tk.X, padx=12, pady=8)
+        # -- Top: Create Bot Form --
+        create_frame = tk.LabelFrame(self.content, text="Launch New Bot")
+        create_frame.pack(fill=tk.X, padx=12, pady=5)
 
-        tk.Label(create, text="Strategy ID").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.bot_strategy = ttk.Combobox(
-            create,
-            width=38,
-            values=[
-                "mean_reversion_losers",
-                "moving_average",
-                "rsi_reversion",
-                "macd_trend",
-            ],
-        )
-        self.bot_strategy.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        # Row 1: Main Config
+        r1 = tk.Frame(create_frame)
+        r1.pack(fill=tk.X, padx=5, pady=5)
+
+        tk.Label(r1, text="Strategy:").pack(side=tk.LEFT)
+        self.bot_strategy = ttk.Combobox(r1, values=["mean_reversion_losers", "moving_average", "rsi_reversion", "macd_trend"], width=25)
+        self.bot_strategy.pack(side=tk.LEFT, padx=5)
         self.bot_strategy.set("moving_average")
 
-        self.bot_strategy_desc = tk.Label(create, text="", fg="#555", wraplength=760)
-        self.bot_strategy_desc.grid(row=0, column=2, sticky="w", padx=6)
+        tk.Label(r1, text="Symbols:").pack(side=tk.LEFT, padx=(10, 0))
+        self.bot_symbols = tk.Entry(r1, width=20)
+        self.bot_symbols.insert(0, "AAPL,MSFT")
+        self.bot_symbols.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(create, text="Symbols (comma-separated)").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        self.bot_symbols = tk.Entry(create, width=42)
-        self.bot_symbols.grid(row=1, column=1, sticky="w", padx=6, pady=4)
-        self.bot_symbols.insert(0, "AAPL, MSFT, TSLA")
+        tk.Label(r1, text="Capital ($):").pack(side=tk.LEFT, padx=(10, 0))
+        self.bot_capital = tk.Entry(r1, width=10)
+        self.bot_capital.insert(0, "2000")
+        self.bot_capital.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(create, text="Capital Allocation ($)").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        self.bot_capital = tk.Entry(create, width=20)
-        self.bot_capital.grid(row=2, column=1, sticky="w", padx=6, pady=4)
-        self.bot_capital.insert(0, "5000")
+        tk.Button(r1, text="START BOT", bg="#2ecc71", fg="white", font=("Arial", 10, "bold"), command=self.on_start_bot).pack(side=tk.LEFT, padx=20)
 
-        self.bot_params_frame = tk.LabelFrame(self.content, text="Strategy Parameters (same keys as Backtest)")
-        self.bot_params_frame.pack(fill=tk.X, padx=12, pady=8)
-
-        btns = tk.Frame(self.content)
-        btns.pack(fill=tk.X, padx=12)
-        tk.Button(btns, text="Start Bot", width=14, command=self.on_start_bot).pack(side=tk.LEFT)
-        tk.Button(btns, text="Stop Bot", width=14, command=self.on_stop_bot).pack(side=tk.LEFT, padx=8)
-        tk.Label(btns, text="Hooks: POST /bots/start and POST /bots/stop", fg="#666").pack(side=tk.LEFT, padx=10)
-
-        tk.Label(self.content, text="Running Bots (placeholder)", font=("Arial", 12, "bold")).pack(
-            pady=(12, 6)
-        )
-        bots_box = tk.Text(self.content, height=18, width=125)
-        bots_box.insert(
-            "1.0",
-            "BotID | Strategy | Status | PnL | Started\n"
-            "------------------------------------------------------------\n"
-            "b1    | moving_average | RUNNING | +$45 | 2026-01-12 09:30\n",
-        )
-        bots_box.config(state=tk.DISABLED)
-        bots_box.pack(padx=12)
-
+        # Row 2: Dynamic Variables (The "Wariables" section)
+        self.bot_params_frame = tk.LabelFrame(create_frame, text="Strategy Variables (Params)")
+        self.bot_params_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.bot_param_entries = {}
+        
+        # Bind change event
         self.bot_strategy.bind("<<ComboboxSelected>>", lambda e: self._render_bot_params())
-        self._render_bot_params()
+        self._render_bot_params() # Initial render
+
+        # -- Bottom: Real Bot List --
+        list_frame = tk.LabelFrame(self.content, text="Your Bots")
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+
+        # Toolbar with Normal Buttons
+        toolbar = tk.Frame(list_frame)
+        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 1. Refresh
+        tk.Button(toolbar, text="Refresh List", command=self.refresh_bot_list).pack(side=tk.LEFT)
+        
+        # 2. Restart (Green)
+        tk.Button(toolbar, text="Restart", bg="#2ecc71", fg="white", width=10, command=self.on_restart_bot_btn).pack(side=tk.LEFT, padx=10)
+
+        # 3. Stop (Orange)
+        tk.Button(toolbar, text="Stop", bg="#f39c12", fg="white", width=10, command=self.on_stop_only_btn).pack(side=tk.LEFT, padx=0)
+        
+        # 4. Delete (Red)
+        tk.Button(toolbar, text="Delete", bg="#c0392b", fg="white", width=10, command=self.on_delete_bot_btn).pack(side=tk.RIGHT, padx=10)
+
+        # Table
+        cols = ("bot_id", "name", "strategy", "symbols", "capital", "status")
+        self.bots_tree = ttk.Treeview(list_frame, columns=cols, show="headings")
+        self.bots_tree.heading("bot_id", text="ID")
+        self.bots_tree.heading("name", text="Name")
+        self.bots_tree.heading("strategy", text="Strategy")
+        self.bots_tree.heading("symbols", text="Symbols")
+        self.bots_tree.heading("capital", text="Capital")
+        self.bots_tree.heading("status", text="Status")
+        
+        self.bots_tree.column("bot_id", width=60)
+        self.bots_tree.column("name", width=120)
+        self.bots_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.refresh_bot_list()
 
     def _render_bot_params(self):
+        # Clear existing
         for w in self.bot_params_frame.winfo_children():
             w.destroy()
-
-        sid = self.bot_strategy.get().strip()
+        
         self.bot_param_entries = {}
+        sid = self.bot_strategy.get().strip()
 
-        desc_map = {
-            "mean_reversion_losers": "Daily: buy worst N losers at open and sell at close (optional stop-loss).",
-            "moving_average": "Trend: buy/sell on SMA/EMA crossover (optional stop-loss/take-profit).",
-            "rsi_reversion": "Mean reversion: buy when RSI <= oversold, sell when RSI >= overbought.",
-            "macd_trend": "Momentum: buy/sell on MACD vs signal crossover (optional risk rules).",
-        }
-        self.bot_strategy_desc.config(text=desc_map.get(sid, ""))
-
+        # Define fields based on strategy
+        specs = []
         if sid == "mean_reversion_losers":
             specs = [
-                ("losers_to_buy", "Losers to Buy", "5"),
-                ("enable_stop_loss", "Enable Stop Loss (true/false)", "false"),
-                ("stop_loss_pct", "Stop Loss % (e.g. 0.03)", "0.03"),
+                ("losers_to_buy", "Losers Count", "5"),
                 ("timeframe", "Timeframe", "1D"),
+                ("stop_loss_pct", "Stop Loss %", "0.03")
             ]
         elif sid == "moving_average":
             specs = [
-                ("ma_type", "MA Type (SMA/EMA)", "SMA"),
+                ("ma_type", "Type (SMA/EMA)", "SMA"),
                 ("short_period", "Short Period", "20"),
                 ("long_period", "Long Period", "50"),
-                ("stop_loss_pct", "Stop Loss % (0 disables)", "0.0"),
-                ("take_profit_pct", "Take Profit % (0 disables)", "0.0"),
-                ("timeframe", "Timeframe", "1D"),
+                ("timeframe", "Timeframe", "5Min")
             ]
         elif sid == "rsi_reversion":
             specs = [
                 ("rsi_period", "RSI Period", "14"),
                 ("oversold", "Oversold", "30"),
                 ("overbought", "Overbought", "70"),
-                ("stop_loss_pct", "Stop Loss % (0 disables)", "0.0"),
-                ("take_profit_pct", "Take Profit % (0 disables)", "0.0"),
-                ("timeframe", "Timeframe", "1D"),
+                ("timeframe", "Timeframe", "15Min")
             ]
-        else:
+        elif sid == "macd_trend":
             specs = [
-                ("fast_period", "Fast Period", "12"),
-                ("slow_period", "Slow Period", "26"),
-                ("signal_period", "Signal Period", "9"),
-                ("stop_loss_pct", "Stop Loss % (0 disables)", "0.0"),
-                ("take_profit_pct", "Take Profit % (0 disables)", "0.0"),
-                ("timeframe", "Timeframe", "1D"),
+                ("fast_period", "Fast", "12"),
+                ("slow_period", "Slow", "26"),
+                ("signal_period", "Signal", "9"),
+                ("timeframe", "Timeframe", "30Min")
             ]
-
-        for r, (key, label, example) in enumerate(specs):
-            tk.Label(self.bot_params_frame, text=label).grid(row=r, column=0, sticky="w", padx=8, pady=4)
-            ent = tk.Entry(self.bot_params_frame, width=26)
-            ent.grid(row=r, column=1, sticky="w", padx=8, pady=4)
-            ent.insert(0, example)
-            tk.Label(self.bot_params_frame, text=f"Example: {example}", fg="#666").grid(
-                row=r, column=2, sticky="w", padx=8
-            )
+        
+        # Draw fields
+        for i, (key, label, default) in enumerate(specs):
+            f = tk.Frame(self.bot_params_frame)
+            f.pack(side=tk.LEFT, padx=10, pady=5)
+            tk.Label(f, text=label).pack(anchor="w")
+            ent = tk.Entry(f, width=10)
+            ent.insert(0, default)
+            ent.pack()
             self.bot_param_entries[key] = ent
+
+    # --- ACTION HANDLERS ---
 
     def on_start_bot(self):
         try:
-            from client.utils import parse_symbols, collect_params
-            if not self.app.api:
-                raise ValueError("Not connected. Please login again.")
-            sid = self.bot_strategy.get().strip()
-            symbols = parse_symbols(self.bot_symbols.get())
-            capital = float(self.bot_capital.get().strip())
-            raw_params = {k: ent.get() for k, ent in self.bot_param_entries.items()}
-            params = collect_params(raw_params)
-            name = f"{sid}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            payload = {"name": name, "strategy_id": sid, "symbols": symbols, "params": params, "capital": capital}
-            resp = self.app.api.start_bot(payload)
-            messagebox.showinfo("Bot Started", f"Started bot_id: {resp.get('bot_id')}")
+            sid = self.bot_strategy.get()
+            syms = [s.strip().upper() for s in self.bot_symbols.get().split(",") if s.strip()]
+            cap = float(self.bot_capital.get())
+            
+            # Collect dynamic params
+            params = {k: v.get() for k, v in self.bot_param_entries.items()}
+            
+            payload = {
+                "name": f"{sid}-{len(syms)}s",
+                "strategy_id": sid,
+                "symbols": syms,
+                "params": params,
+                "capital": cap
+            }
+            self.app.api.start_bot(payload)
+            messagebox.showinfo("Success", "Bot started successfully!")
+            self.refresh_bot_list()
         except Exception as e:
-            messagebox.showerror("Start Bot Error", str(e))
+            messagebox.showerror("Start Error", str(e))
 
-    def on_stop_bot(self):
+    def on_restart_bot_btn(self):
+        sel = self.bots_tree.selection()
+        if not sel:
+            messagebox.showwarning("Select Bot", "Please select a bot to restart.")
+            return
+        bot_id = sel[0]
         try:
-            if not self.app.api:
-                raise ValueError("Not connected. Please login again.")
-            bot_id = self.stop_bot_id.get().strip() if hasattr(self, "stop_bot_id") else ""
-            if not bot_id:
-                raise ValueError("Enter Bot ID to stop.")
-            self.app.api.stop_bot(bot_id)
-            messagebox.showinfo("Bot Stopped", f"Stopped bot_id: {bot_id}")
+            self.app.api.restart_bot(bot_id)
+            messagebox.showinfo("Success", "Bot restarted.")
+            self.refresh_bot_list()
         except Exception as e:
-            messagebox.showerror("Stop Bot Error", str(e))
+            messagebox.showerror("Restart Error", str(e))
+
+    def on_stop_only_btn(self):
+        sel = self.bots_tree.selection()
+        if not sel:
+            messagebox.showwarning("Select Bot", "Please select a bot to stop.")
+            return
+        bot_id = sel[0]
+        try:
+            self.app.api.stop_bot(bot_id)
+            messagebox.showinfo("Success", "Bot stopped (Paused).")
+            self.refresh_bot_list()
+        except Exception as e:
+            messagebox.showerror("Stop Error", str(e))
+
+    def on_delete_bot_btn(self):
+        sel = self.bots_tree.selection()
+        if not sel:
+            messagebox.showwarning("Select Bot", "Please select a bot to delete.")
+            return
+        
+        bot_id = sel[0]
+        confirm = messagebox.askyesno("Confirm Delete", "Are you sure? This will STOP the bot and DELETE it from the database permanently.")
+        
+        if confirm:
+            try:
+                self.app.api.delete_bot(bot_id)
+                messagebox.showinfo("Success", "Bot deleted.")
+                self.refresh_bot_list()
+            except Exception as e:
+                messagebox.showerror("Delete Error", str(e))
+
+    def refresh_bot_list(self):
+        for row in self.bots_tree.get_children():
+            self.bots_tree.delete(row)
+        try:
+            bots = self.app.api.list_bots()
+            for b in bots:
+                sym_str = ",".join(b.get("symbols", []))
+                self.bots_tree.insert("", "end", values=(
+                    b.get("bot_id")[:8],
+                    b.get("name"),
+                    b.get("strategy_id"),
+                    sym_str,
+                    f"${b.get('capital')}",
+                    b.get("status").upper()
+                ), iid=b.get("bot_id"))
+        except:
+            pass
 
     # -----------------------------
-    # History
+    # 3. REAL HISTORY PAGE
     # -----------------------------
     def show_history(self):
         self.clear_content()
-        tk.Label(self.content, text="Trade History (Server)", font=("Arial", 20)).pack(pady=12)
+        tk.Label(self.content, text="Trade History", font=("Arial", 20)).pack(pady=12)
 
-        tk.Label(self.content, text="Placeholder: backend returns trades grouped by bot.", fg="#555").pack(
-            pady=(0, 10)
-        )
+        # Table
+        cols = ("time", "symbol", "side", "qty", "price", "bot")
+        tree = ttk.Treeview(self.content, columns=cols, show="headings", height=20)
+        tree.heading("time", text="Time (UTC)")
+        tree.heading("symbol", text="Symbol")
+        tree.heading("side", text="Side")
+        tree.heading("qty", text="Qty")
+        tree.heading("price", text="Price")
+        tree.heading("bot", text="Bot ID")
+        
+        tree.column("time", width=160)
+        tree.column("symbol", width=80)
+        tree.column("side", width=60)
+        tree.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
 
-        hist = tk.Text(self.content, height=30, width=125)
+        # Refresh Button
+        tk.Button(self.content, text="Refresh Trades", command=lambda: self._load_history(tree)).pack(pady=5)
+        
+        self._load_history(tree)
+
+    def _load_history(self, tree):
+        for row in tree.get_children():
+            tree.delete(row)
         try:
-            if not self.app.api:
-                raise ValueError("Not connected. Please login again.")
-            data = self.app.api.get_history()
-            hist.insert("1.0", "Timestamp | BotID | Symbol | Side | Qty | Price")
-            hist.insert("end", "-" * 80 + "")
-            for t in data:
-                hist.insert("end", f"{t.get('executed_at','')} | {t.get('bot_id','')} | {t.get('symbol','')} | {t.get('side','')} | {t.get('quantity','')} | {t.get('price','')}")
+            trades = self.app.api.get_history() #
+            for t in trades:
+                tree.insert("", "end", values=(
+                    t.get("executed_at", "").replace("T", " ")[:19],
+                    t.get("symbol"),
+                    t.get("side"),
+                    t.get("quantity"),
+                    f"${t.get('price')}",
+                    t.get("bot_id")[:8]
+                ))
         except Exception as e:
-            hist.insert("1.0", f"Error loading history: {e}")
-        hist.config(state=tk.DISABLED)
-        hist.pack(padx=12)
+            messagebox.showerror("Error", f"Could not load history: {e}")
 
     # -----------------------------
-    # Settings
+    # 4. SETTINGS PAGE (Auto-Fill)
     # -----------------------------
     def show_settings(self):
         self.clear_content()
         tk.Label(self.content, text="Settings", font=("Arial", 20)).pack(pady=12)
 
-        form = tk.LabelFrame(self.content, text="Account & Integrations")
+        form = tk.LabelFrame(self.content, text="Account Configuration")
         form.pack(fill=tk.X, padx=12, pady=10)
 
-        tk.Label(form, text="Change Username").grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        self.set_username = tk.Entry(form, width=40)
-        self.set_username.grid(row=0, column=1, sticky="w", padx=8, pady=4)
+        # -- Restored Username/Password Fields --
+        tk.Label(form, text="Change Username").grid(row=0, column=0, sticky="e", padx=10, pady=5)
+        self.set_username = tk.Entry(form, width=30)
         self.set_username.insert(0, self.app.user or "")
-        tk.Label(form, text="Example: leo", fg="#666").grid(row=0, column=2, sticky="w")
+        self.set_username.grid(row=0, column=1, sticky="w")
 
-        tk.Label(form, text="New Password").grid(row=1, column=0, sticky="w", padx=8, pady=4)
-        self.set_pw1 = tk.Entry(form, width=40, show="*")
-        self.set_pw1.grid(row=1, column=1, sticky="w", padx=8, pady=4)
-        tk.Label(form, text="Example: strongpassword", fg="#666").grid(row=1, column=2, sticky="w")
+        tk.Label(form, text="New Password").grid(row=1, column=0, sticky="e", padx=10, pady=5)
+        self.set_pw1 = tk.Entry(form, width=30, show="*")
+        self.set_pw1.grid(row=1, column=1, sticky="w")
 
-        tk.Label(form, text="Confirm Password").grid(row=2, column=0, sticky="w", padx=8, pady=4)
-        self.set_pw2 = tk.Entry(form, width=40, show="*")
-        self.set_pw2.grid(row=2, column=1, sticky="w", padx=8, pady=4)
+        tk.Label(form, text="Confirm Password").grid(row=2, column=0, sticky="e", padx=10, pady=5)
+        self.set_pw2 = tk.Entry(form, width=30, show="*")
+        self.set_pw2.grid(row=2, column=1, sticky="w")
 
-        tk.Label(form, text="Alpaca API Key").grid(row=3, column=0, sticky="w", padx=8, pady=4)
-        self.alpaca_key = tk.Entry(form, width=40, show="*")
-        self.alpaca_key.grid(row=3, column=1, sticky="w", padx=8, pady=4)
-        tk.Label(form, text="Example: AK...", fg="#666").grid(row=3, column=2, sticky="w")
+        tk.Frame(form, height=2, bg="#ddd").grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
 
-        tk.Label(form, text="Alpaca API Secret").grid(row=4, column=0, sticky="w", padx=8, pady=4)
+        # -- API Keys --
+        # Pre-fill logic
+        curr = {}
+        try: curr = self.app.api.get_settings()
+        except: pass
+
+        tk.Label(form, text="Alpaca API Key").grid(row=4, column=0, sticky="e", padx=10, pady=5)
+        self.alpaca_key = tk.Entry(form, width=40)
+        self.alpaca_key.grid(row=4, column=1, sticky="w")
+        if curr.get("alpaca_key_id"): self.alpaca_key.insert(0, curr["alpaca_key_id"])
+
+        tk.Label(form, text="Alpaca Secret").grid(row=5, column=0, sticky="e", padx=10, pady=5)
         self.alpaca_secret = tk.Entry(form, width=40, show="*")
-        self.alpaca_secret.grid(row=4, column=1, sticky="w", padx=8, pady=4)
-        tk.Label(form, text="Example: SK...", fg="#666").grid(row=4, column=2, sticky="w")
+        self.alpaca_secret.grid(row=5, column=1, sticky="w")
+        if curr.get("alpaca_secret_key"): self.alpaca_secret.insert(0, curr["alpaca_secret_key"])
 
-        tk.Label(form, text="Discord Webhook URL").grid(row=5, column=0, sticky="w", padx=8, pady=4)
-        self.discord_webhook = tk.Entry(form, width=60)
-        self.discord_webhook.grid(row=5, column=1, sticky="w", padx=8, pady=4)
-        tk.Label(form, text="Example: https://discord.com/api/webhooks/...", fg="#666").grid(
-            row=5, column=2, sticky="w"
-        )
+        tk.Label(form, text="Discord Webhook").grid(row=6, column=0, sticky="e", padx=10, pady=5)
+        self.discord_webhook = tk.Entry(form, width=50)
+        self.discord_webhook.grid(row=6, column=1, sticky="w")
+        if curr.get("discord_webhook"): self.discord_webhook.insert(0, curr["discord_webhook"])
 
-        btns = tk.Frame(self.content)
-        btns.pack(fill=tk.X, padx=12)
-        tk.Button(btns, text="Save Settings", width=16, command=self.on_save_settings).pack(side=tk.LEFT)
-        tk.Label(btns, text="Hook: POST /settings/update", fg="#666").pack(side=tk.LEFT, padx=10)
+        tk.Button(form, text="Save Settings", bg="#3498db", fg="white", command=self.on_save_settings).grid(row=7, column=1, sticky="w", pady=15)
 
     def on_save_settings(self):
         try:
-            if not self.app.api:
-                raise ValueError("Not connected. Please login again.")
+            # Note: Backend might not support username/pass update yet, 
+            # but we send the API key payload as requested.
             payload = {
-                "alpaca_key_id": (self.alpaca_key.get().strip() or None),
-                "alpaca_secret_key": (self.alpaca_secret.get().strip() or None),
-                "alpaca_base_url": None,
-                "discord_webhook": (self.discord_webhook.get().strip() or None),
+                "alpaca_key_id": self.alpaca_key.get().strip(),
+                "alpaca_secret_key": self.alpaca_secret.get().strip(),
+                "discord_webhook": self.discord_webhook.get().strip(),
             }
             self.app.api.update_settings(payload)
-            messagebox.showinfo("Saved", "Settings saved to server.")
+            
+            # Simple check for password match (Client side validation)
+            p1 = self.set_pw1.get()
+            p2 = self.set_pw2.get()
+            if p1 and p1 != p2:
+                messagebox.showerror("Error", "Passwords do not match!")
+                return
+            
+            messagebox.showinfo("Saved", "Settings updated (Keys saved).")
         except Exception as e:
-            messagebox.showerror("Settings Error", str(e))
+            messagebox.showerror("Error", str(e))
 
 
 if __name__ == "__main__":

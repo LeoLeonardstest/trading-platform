@@ -104,6 +104,13 @@ class ApiClient:
     def list_bots(self) -> Dict[str, Any]:
         return self._get("/bots")
 
+    def delete_bot(self, bot_id: str) -> Dict[str, Any]:
+        return self._post("/bots/delete", {"bot_id": bot_id})
+    
+    def restart_bot(self, bot_id: str) -> Dict[str, Any]:
+        """Restarts a stopped bot using its existing configuration."""
+        return self._post("/bots/restart", {"bot_id": bot_id})
+    
     # -----------------------------
     # History / Status
     # -----------------------------

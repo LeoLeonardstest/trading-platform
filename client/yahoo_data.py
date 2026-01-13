@@ -114,7 +114,8 @@ def _read_cached_csv(path: Path) -> pd.DataFrame:
         return df
 
     # Fallback: assume first column is datetime index
-    df = pd.read_csv(path, index_col=0, parse_dates=[0])
+    df = pd.read_csv(path, index_col=0)
+    df.index = pd.to_datetime(df.index, utc=True)
     df.index.name = "Datetime"
     return df
 
@@ -126,17 +127,6 @@ def fetch_ohlcv(
     timeframe: str = "1D",
     options: Optional[YahooLoadOptions] = None,
 ) -> pd.DataFrame:
-    """Fetch OHLCV for a single symbol.
-
-    Args:
-        symbol: ticker, e.g. "AAPL"
-        start/end: date strings "YYYY-MM-DD"
-        timeframe: shared canonical timeframe (e.g., 5Min, 1H, 1D)
-
-    Returns:
-        DataFrame with columns: Open, High, Low, Close, Volume
-        Index: DatetimeIndex named "Datetime"
-    """
     if yf is None:
         raise ImportError("yfinance is required. pip install yfinance")
 
@@ -148,10 +138,10 @@ def fetch_ohlcv(
     p = _cache_path(symbol, interval, start, end, options.cache_dir)
     if options.use_cache and p.exists():
         df = _read_cached_csv(p)
-        # Ensure expected OHLCV columns exist (some sources may lowercase)
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
+    # 1. LEJUPIELĀDE
     df = yf.download(
         tickers=symbol,
         start=start,
@@ -159,21 +149,33 @@ def fetch_ohlcv(
         interval=interval,
         auto_adjust=False,
         progress=False,
-        threads=False,
     )
+    print(f"DEBUG: Saņemtas {len(df)} rindas")
+    print(f"DEBUG: Kolonnu nosaukumi: {df.columns.tolist()}")
 
+    # 2. PĀRBAUDE: Vai vispār ir dati (Yahoo 60 dienu limits)
     if df is None or df.empty:
-        raise ValueError(f"No data returned for {symbol}")
+        raise ValueError(f"KĻŪDA: Yahoo Finance neatgrieza datus priekš {symbol}. "
+                         f"Pārbaudi, vai 5m datus neprasi senākus par 60 dienām!")
 
-    # Standardize index name so cache is stable
+    # 3. FIX: Jaunais yfinance MultiIndex (saplacinām kolonnas)
+    # Ja kolonnas ir ('MSFT', 'Open'), pārvēršam tās par 'Open'
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # 2. Drošības pēc noņemam tukšumus no nosaukumiem
+    df.columns = [str(c).strip() for c in df.columns]
+    # 4. Standartizējam indeksu
     df.index.name = "Datetime"
 
-    # Keep expected columns
+    # 5. Filtrējam tikai vajadzīgās kolonnas
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[keep].copy()
-    
+
+    # 6. Pēdējā pārbaude pirms atgriešanas
+    if df.empty or len(df) < 2:
+        raise ValueError("Datu rāmis pēc apstrādes ir tukšs vai par īsu backtestam.")
+
     if options.use_cache:
-        # Force consistent header for datetime index
         df.to_csv(p, index_label="Datetime")
 
     return df

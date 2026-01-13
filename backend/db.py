@@ -245,7 +245,15 @@ def get_bot(bot_id: str) -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
-
+def delete_bot(bot_id: str) -> None:
+    conn = _connect()
+    # Delete associated trades first (optional, keeps DB clean)
+    conn.execute("DELETE FROM trades WHERE bot_id = ?", (bot_id,))
+    # Delete the bot
+    conn.execute("DELETE FROM bots WHERE bot_id = ?", (bot_id,))
+    conn.commit()
+    conn.close()
+    
 # -------------------------
 # Trades / History
 # -------------------------

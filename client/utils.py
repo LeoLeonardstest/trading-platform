@@ -18,7 +18,25 @@ def parse_symbols(text: str) -> List[str]:
 
 
 def parse_date(text: str, fmt: str = "%Y-%m-%d") -> datetime:
-    return datetime.strptime(text.strip(), fmt)
+    s = (text or "").strip()
+    if not s:
+        raise ValueError("Date is required (YYYY-MM-DD)")
+
+    # If the user typed extra stuff, take the first YYYY-MM-DD part
+    if len(s) >= 10:
+        head = s[:10]
+        try:
+            return datetime.strptime(head, fmt)
+        except ValueError:
+            pass
+
+    # Fallback: try dateutil (installed with pandas)
+    try:
+        from dateutil import parser as du_parser
+        dt = du_parser.parse(s)
+        return datetime(dt.year, dt.month, dt.day)
+    except Exception:
+        raise ValueError(f"Invalid date: {s!r} (expected YYYY-MM-DD)")
 
 
 def parse_bool(text: str) -> bool:
