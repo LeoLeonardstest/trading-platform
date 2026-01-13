@@ -239,19 +239,20 @@ def bot_status(bot_id: str, user_id: str = Depends(get_current_user_id)):
 
 @app.post("/bots/restart")
 def restart_bot(req: RestartBotReq, user_id: str = Depends(get_current_user_id)):
-    # 1. Verify bot exists and belongs to user
+    # 1. Get the bot from the database
     bot_row = db.get_bot(req.bot_id)
     if not bot_row or bot_row["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    # 2. Check if already running
+    # 2. Check if it's already running to avoid duplicates
     if runner.is_running(req.bot_id):
         raise HTTPException(status_code=400, detail="Bot is already running")
 
-    # 3. Start the bot using the existing configuration
+    # 3. Start the bot again using the saved settings
     runner.start_bot(bot_row)
     
     return {"ok": True, "bot_id": req.bot_id}
+
 
 @app.post("/bots/delete")
 def delete_bot_endpoint(req: StopBotReq, user_id: str = Depends(get_current_user_id)):
@@ -259,10 +260,10 @@ def delete_bot_endpoint(req: StopBotReq, user_id: str = Depends(get_current_user
     if not bot or bot["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    # 1. Stop the running process in RAM
+    # 1. Stop the bot if it is running
     runner.stop_bot(req.bot_id)
     
-    # 2. Delete the record from Disk (DB)
+    # 2. Delete it from the database
     db.delete_bot(req.bot_id)
     
     return {"ok": True}
