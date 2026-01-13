@@ -9,6 +9,8 @@ build/
 
 # Virtual envs
 .venv/
+__pycache__/
+*.pyc
 venv/
 
 # Local cache
