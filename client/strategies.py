@@ -30,6 +30,8 @@ class Position:
     qty: int = 0
     avg_price: float = 0.0
 
+def _has_series_data(s) -> bool:
+    return isinstance(s, pd.Series) and (not s.empty)
 
 def _ensure_sorted(df: pd.DataFrame) -> pd.DataFrame:
     if not df.index.is_monotonic_increasing:

@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic==2.8.2
 requests==2.32.3
 pandas==2.2.2
-matplotlib==3.9.1
+matplotlib==3.9.0
 yfinance==0.2.43
 alpaca-trade-api==3.2.0
 python-dotenv==1.0.1

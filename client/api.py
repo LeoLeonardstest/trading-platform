@@ -60,16 +60,27 @@ class ApiClient:
     # -----------------------------
     # Auth
     # -----------------------------
-    def login(self, username: str, password: str) -> Dict[str, Any]:
-        """Expected response: {"token": "...", "user_id": "..."}"""
-        data = self._post("/auth/login", {"username": username, "password": password})
-        if "token" in data:
-            self.token = data["token"]
+    def login(self, username: str, password: str) -> dict:
+        r = requests.post(
+            f"{self.base_url}/auth/login",
+            json={"username": username, "password": password},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        self.token = data.get("token")
         return data
 
-    def register(self, username: str, password: str) -> Dict[str, Any]:
-        return self._post("/auth/register", {"username": username, "password": password})
-
+    def register(self, username: str, password: str) -> dict:
+        r = requests.post(
+            f"{self.base_url}/auth/register",
+            json={"username": username, "password": password},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        self.token = data.get("token")
+        return data
     # -----------------------------
     # Settings
     # -----------------------------

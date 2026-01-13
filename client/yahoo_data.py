@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import time
 
 import pandas as pd
 
@@ -32,6 +33,28 @@ def _cache_path(symbol: str, interval: str, start: str, end: str, cache_dir: Pat
     safe = symbol.replace("/", "_")
     return cache_dir / f"{safe}__{interval}__{start}__{end}.csv"
 
+def _download_with_retries(symbol: str, start: str, end: str, interval: str, tries: int = 3) -> pd.DataFrame:
+    last_err = None
+    for i in range(tries):
+        try:
+            df = yf.download(
+                tickers=symbol,
+                start=start,
+                end=end,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="column",
+            )
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            last_err = e
+        time.sleep(1.5 * (i + 1))
+    if last_err:
+        raise last_err
+    return pd.DataFrame()
 
 def _to_yf_interval(timeframe: str) -> str:
     """
@@ -40,6 +63,13 @@ def _to_yf_interval(timeframe: str) -> str:
     """
     tf = (timeframe or "1D").strip()
     tf_lower = tf.lower()
+
+    # Support canonical shared values like "1H" and "1D"
+    tf_upper = tf.strip().upper()
+    if tf_upper == "1H":
+        return "1h"
+    if tf_upper == "1D":
+        return "1d"
 
     mapping = {
         "1min": "1m",
@@ -57,15 +87,36 @@ def _to_yf_interval(timeframe: str) -> str:
         "1day": "1d",
         "day": "1d",
     }
-
-    # Support canonical shared values like "1H" and "1D"
-    if tf_upper := tf.strip().upper():
-        if tf_upper == "1H":
-            return "1h"
-        if tf_upper == "1D":
-            return "1d"
-
     return mapping.get(tf_lower, "1d")
+
+
+def _read_cached_csv(path: Path) -> pd.DataFrame:
+    """
+    Robust cache reader:
+    - Supports old caches with 'Date' column
+    - Supports caches with unnamed first column
+    - Supports current caches with 'Datetime' column
+    """
+    # Read header first without parsing to detect columns
+    preview = pd.read_csv(path, nrows=1)
+    cols = list(preview.columns)
+
+    # Preferred: Datetime column
+    if "Datetime" in cols:
+        df = pd.read_csv(path, parse_dates=["Datetime"], index_col="Datetime")
+        df.index.name = "Datetime"
+        return df
+
+    # Common older format: Date column
+    if "Date" in cols:
+        df = pd.read_csv(path, parse_dates=["Date"], index_col="Date")
+        df.index.name = "Datetime"
+        return df
+
+    # Fallback: assume first column is datetime index
+    df = pd.read_csv(path, index_col=0, parse_dates=[0])
+    df.index.name = "Datetime"
+    return df
 
 
 def fetch_ohlcv(
@@ -96,7 +147,9 @@ def fetch_ohlcv(
 
     p = _cache_path(symbol, interval, start, end, options.cache_dir)
     if options.use_cache and p.exists():
-        df = pd.read_csv(p, parse_dates=["Datetime"], index_col="Datetime")
+        df = _read_cached_csv(p)
+        # Ensure expected OHLCV columns exist (some sources may lowercase)
+        df.columns = [str(c).strip() for c in df.columns]
         return df
 
     df = yf.download(
@@ -112,11 +165,15 @@ def fetch_ohlcv(
     if df is None or df.empty:
         raise ValueError(f"No data returned for {symbol}")
 
+    # Standardize index name so cache is stable
     df.index.name = "Datetime"
+
+    # Keep expected columns
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[keep].copy()
-
+    
     if options.use_cache:
-        df.to_csv(p)
+        # Force consistent header for datetime index
+        df.to_csv(p, index_label="Datetime")
 
     return df

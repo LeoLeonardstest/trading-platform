@@ -1,3 +1,4 @@
+from __future__ import annotations
 """client/app.py
 
 Finished desktop UI for the Trading Platform (University Project)
@@ -24,6 +25,7 @@ Dependencies:
 - tkinter (built-in)
 - matplotlib (optional, for equity curve chart)
 """
+
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -47,17 +49,15 @@ APP_TITLE = "Trading Platform"
 WINDOW_SIZE = "1280x780"
 DATE_FMT = "%Y-%m-%d"  # UI date input format
 
-
 class TradingApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_TITLE)
-        self.geometry(WINDOW_SIZE)
-        self.resizable(False, False)
+        self.title("Trading Platform")
+        self.geometry("1280x780")
 
-        self.user = None  # logged-in username
+        self.api = None
+        self.user = None
         self.user_id = None
-        self.api = None  # ApiClient
 
         self.container = tk.Frame(self)
         self.container.pack(fill=tk.BOTH, expand=True)
@@ -65,8 +65,8 @@ class TradingApp(tk.Tk):
         self.show_login()
 
     def clear(self):
-        for widget in self.container.winfo_children():
-            widget.destroy()
+        for w in self.container.winfo_children():
+            w.destroy()
 
     def show_login(self):
         self.clear()
@@ -82,61 +82,69 @@ class LoginPage(tk.Frame):
         super().__init__(parent)
         self.app = app
 
-        tk.Label(self, text="Login", font=("Arial", 22)).pack(pady=40)
+        tk.Label(self, text="Login", font=("Arial", 22)).pack(pady=20)
 
         tk.Label(self, text="Username").pack()
         self.username = tk.Entry(self, width=30)
-        self.username.insert(0, "leo")
+        self.username.insert(0, "testuser1")
         self.username.pack(pady=5)
 
         tk.Label(self, text="Password").pack()
         self.password = tk.Entry(self, width=30, show="*")
-        self.password.insert(0, "password")
+        self.password.insert(0, "testpass123")
         self.password.pack(pady=5)
 
-        tk.Button(self, text="Login", width=25, command=self.login).pack(pady=20)
+        btn_row = tk.Frame(self)
+        btn_row.pack(pady=15)
+
+        tk.Button(btn_row, text="Login", width=16, command=self.on_login).pack(side="left", padx=6)
+        tk.Button(btn_row, text="Register", width=16, command=self.on_register).pack(side="left", padx=6)
 
         tk.Label(
             self,
-            text="Authentication is a placeholder. Backend integration goes in client/api.py",
+            text="Uses EC2 backend for authentication and settings.",
             fg="#666",
         ).pack(pady=10)
 
-    def login(self):
-        if not self.username.get() or not self.password.get():
-            messagebox.showerror("Error", "Username and password required")
-            return
-        self.app.user = self.username.get().strip()
-        self.app.show_main()
+    def on_login(self):
+        try:
+            base_url = "http://35.159.124.180:8000"
+            self.app.api = ApiClient(base_url)
 
+            username = self.username.get().strip()
+            password = self.password.get().strip()
 
+            data = self.app.api.login(username, password)
 
-def on_login(self):
-    try:
-        base_url = self.base_url.get().strip()
-        self.app.api = ApiClient(base_url)
-        username = self.username.get().strip()
-        password = self.password.get().strip()
-        data = self.app.api.login(username, password)
-        self.app.user = data.get("username", username)
-        self.app.user_id = data.get("user_id")
-        self.app.show_main()
-    except Exception as e:
-        messagebox.showerror("Login Error", str(e))
+            self.app.user = data.get("username", username)
+            self.app.user_id = data.get("user_id")
 
-def on_register(self):
-    try:
-        base_url = self.base_url.get().strip()
-        self.app.api = ApiClient(base_url)
-        username = self.username.get().strip()
-        password = self.password.get().strip()
-        data = self.app.api.register(username, password)
-        self.app.api.token = data.get("token")
-        self.app.user = data.get("username", username)
-        self.app.user_id = data.get("user_id")
-        self.app.show_main()
-    except Exception as e:
-        messagebox.showerror("Register Error", str(e))
+            self.app.show_main()
+        except Exception as e:
+            messagebox.showerror("Login Error", str(e))
+
+    def on_register(self):
+        try:
+            base_url = "http://35.159.124.180:8000"
+            self.app.api = ApiClient(base_url)
+
+            username = self.username.get().strip()
+            password = self.password.get().strip()
+
+            data = self.app.api.register(username, password)
+
+            # ApiClient.register already stores token internally; this is optional
+            self.app.api.token = data.get("token")
+
+            self.app.user = data.get("username", username)
+            self.app.user_id = data.get("user_id")
+
+            self.app.show_main()
+        except Exception as e:
+            if hasattr(e, "response") and e.response is not None:
+                messagebox.showerror("Register Error", f"{e}\n\n{e.response.text}")
+            else:
+                messagebox.showerror("Register Error", str(e))
 
 class MainLayout(tk.Frame):
     def __init__(self, parent, app: TradingApp):
@@ -669,16 +677,12 @@ class MainLayout(tk.Frame):
             if not self.app.api:
                 raise ValueError("Not connected. Please login again.")
             data = self.app.api.get_history()
-            hist.insert("1.0", "Timestamp | BotID | Symbol | Side | Qty | Price
-")
-            hist.insert("end", "-" * 80 + "
-")
+            hist.insert("1.0", "Timestamp | BotID | Symbol | Side | Qty | Price")
+            hist.insert("end", "-" * 80 + "")
             for t in data:
-                hist.insert("end", f"{t.get('executed_at','')} | {t.get('bot_id','')} | {t.get('symbol','')} | {t.get('side','')} | {t.get('quantity','')} | {t.get('price','')}
-")
+                hist.insert("end", f"{t.get('executed_at','')} | {t.get('bot_id','')} | {t.get('symbol','')} | {t.get('side','')} | {t.get('quantity','')} | {t.get('price','')}")
         except Exception as e:
-            hist.insert("1.0", f"Error loading history: {e}
-")
+            hist.insert("1.0", f"Error loading history: {e}")
         hist.config(state=tk.DISABLED)
         hist.pack(padx=12)
 
