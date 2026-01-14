@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, date
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend import db
+from backend.discord import send_discord
+
 import pandas as pd
 
 from shared.models import BotConfig
@@ -251,6 +254,9 @@ class DailyMeanReversionTopLosers(LiveStrategy):
             px = last_trade_price(self.alpaca, sym, fallback_timeframe="1Min")
             if px:
                 print(f"BUYING LOSER: {sym} for ${alloc:.2f}")
+                msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                print(msg)
+                if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(
                     symbol=sym, 
                     notional=alloc, 
@@ -270,6 +276,8 @@ class DailyMeanReversionTopLosers(LiveStrategy):
             if sym and (not self.symbols or sym in self.symbols):
                 qty = int(float(getattr(p, "qty", 0)))
                 if qty > 0:
+                    msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                    print(msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
 
     def tick(self, ctx: StrategyTickContext) -> None:
@@ -300,6 +308,9 @@ class DailyMeanReversionTopLosers(LiveStrategy):
                     stop_pct = float(self.params.get("stop_loss_pct", 0.03)) # Default 3%
                     if stop_pct > 0 and pct_change <= -stop_pct:
                         print(f"STOP LOSS (Losers): {sym} down {pct_change:.2%}")
+                        msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
+                        print(msg)
+                        if self.webhook_url: send_discord(self.webhook_url, msg)
                         self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
         except Exception as e:
             print(f"Error in TopLosers tick: {e}")
@@ -374,11 +385,17 @@ class MovingAverageTrend(LiveStrategy):
                 
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
                     print(f"STOP LOSS: {sym} {pct_change:.2%}")
+                    msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
                 
                 if self.take_profit > 0 and pct_change >= self.take_profit:
                     print(f"TAKE PROFIT: {sym} {pct_change:.2%}")
+                    msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
 
@@ -395,11 +412,17 @@ class MovingAverageTrend(LiveStrategy):
                 
                 if alloc >= 1.0:
                     print(f"BUYING (MA): {sym} for ${alloc:.2f}")
+                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, notional=alloc, side="buy", type="market", time_in_force="day")
 
             # Sell if Short MA < Long MA (Death Cross)
             elif qty > 0 and float(s_ma) < float(l_ma):
                 print(f"SELLING (MA): {sym}")
+                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                print(msg)
+                if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
 
 # =============================================================================
@@ -429,6 +452,13 @@ class RSIMeanReversion(LiveStrategy):
         self.stop_loss = float(self.params.get("stop_loss_pct", 0.0) or 0.0)
         self.take_profit = float(self.params.get("take_profit_pct", 0.0) or 0.0)
         self._last_bar_ts: Dict[str, datetime] = {}
+    # --- GET DISCORD WEBHOOK ---
+        self.webhook_url = None
+        try:
+            settings = db.get_user_settings(bot.user_id)
+            self.webhook_url = settings.get("discord_webhook")
+        except Exception:
+            pass
 
     def tick(self, ctx: StrategyTickContext) -> None:
         # Check market open (Uncomment for real trading)
@@ -482,6 +512,9 @@ class RSIMeanReversion(LiveStrategy):
                 # 1. STOP LOSS (e.g., -0.03 for 3% loss)
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
                     print(f"STOP LOSS TRIGGERED: {sym} dropped {pct_change:.2%}")
+                    msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(
                         symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
                     )
@@ -490,6 +523,9 @@ class RSIMeanReversion(LiveStrategy):
                 # 2. TAKE PROFIT (e.g., +0.05 for 5% gain)
                 if self.take_profit > 0 and pct_change >= self.take_profit:
                     print(f"TAKE PROFIT TRIGGERED: {sym} rose {pct_change:.2%}")
+                    msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(
                         symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
                     )
@@ -512,6 +548,9 @@ class RSIMeanReversion(LiveStrategy):
                 # Buy if we have at least $1
                 if alloc >= 1.0:
                     print(f"BUYING: {sym} for ${alloc:.2f} (Notional)")
+                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(
                         symbol=sym, 
                         notional=alloc,   # <--- Buying Dollars
@@ -525,6 +564,9 @@ class RSIMeanReversion(LiveStrategy):
             # =========================================================
             elif qty > 0 and float(rsi) >= self.overbought:
                 print(f"SELLING: {sym} (RSI Overbought)")
+                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                print(msg)
+                if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(
                     symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
                 )
@@ -605,11 +647,17 @@ class MACDTrend(LiveStrategy):
                 
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
                     print(f"STOP LOSS (MACD): {sym} {pct_change:.2%}")
+                    msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
                 
                 if self.take_profit > 0 and pct_change >= self.take_profit:
                     print(f"TAKE PROFIT (MACD): {sym} {pct_change:.2%}")
+                    msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
 
@@ -628,6 +676,9 @@ class MACDTrend(LiveStrategy):
                 
                 if alloc >= 1.0:
                     print(f"BUYING (MACD): {sym} for ${alloc:.2f}")
+                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                    print(msg)
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(
                         symbol=sym, 
                         notional=alloc,  # <--- Buying Dollars
@@ -639,6 +690,9 @@ class MACDTrend(LiveStrategy):
             # 7. Exit Logic (Death Cross)
             elif qty > 0 and crossed_down:
                 print(f"SELLING (MACD): {sym} (Crossover)")
+                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                print(msg)
+                if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
 
 # =============================================================================
