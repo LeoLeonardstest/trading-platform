@@ -1,4 +1,15 @@
-# backend/bot_runner.py
+"""backend/bot_runner.py
+
+FILE OVERVIEW:
+This file is the "Engine Room". It manages the lifecycle of trading bots.
+Since we want to run multiple bots at once, each bot gets its own Thread.
+
+Key Components:
+1. `BotRunner` class: Starts, Stops, and Monitors bot threads.
+2. `_run_bot_loop`: The infinite loop that every bot runs. It wakes up, checks the market, runs logic, and sleeps.
+3. `AlpacaProxy`: A wrapper around the Alpaca API to intercept orders and log them to our database.
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,19 +26,19 @@ from shared.models import BotConfig, StrategyConfig
 
 
 def _utcnow() -> datetime:
+    """Helper for current UTC time."""
     return datetime.now(timezone.utc)
 
 
 def _bar_seconds(timeframe: str) -> int:
     """
-    Approximate cadence for strategy ticks.
-    Strategy code itself uses Alpaca bars/last-trade as needed, but we want the bot loop to wake
-    at a reasonable frequency tied to the strategy timeframe.
+    Decides how long to sleep based on the strategy timeframe.
+    If running a 1-Minute strategy, sleep 60 seconds.
+    If running a Daily strategy, sleep 24 hours (roughly).
     """
     tf = (timeframe or "").strip()
     tf_lower = tf.lower()
 
-    # allow canonical shared values: 1D / 1H / 5Min / 15Min, etc.
     if tf_lower in ("1min", "1m"):
         return 60
     if tf_lower in ("5min", "5m"):
@@ -41,16 +52,17 @@ def _bar_seconds(timeframe: str) -> int:
     if tf_lower in ("1day", "1d", "day"):
         return 24 * 60 * 60
 
-    # default
-    return 5 * 60
+    return 5 * 60 # Default 5 min
 
 
 class AlpacaProxy:
     """
-    Wraps the Alpaca REST client to:
-    - keep strategies broker-agnostic (they just call alpaca.submit_order)
-    - guarantee that EVERY order submission is recorded in history
-    - optionally send Discord notifications
+    A "Middleman" for the Alpaca API.
+    When a strategy calls `alpaca.submit_order()`, it goes through THIS class first.
+    This allows us to:
+    1. Log the order to our `trades` database table.
+    2. Send a Discord notification.
+    3. Then, pass the order to the real Alpaca API.
     """
     def __init__(self, alpaca: Any, *, user_id: str, bot_id: str, webhook: Optional[str]):
         self._alpaca = alpaca
@@ -59,15 +71,16 @@ class AlpacaProxy:
         self._webhook = webhook
 
     def __getattr__(self, item: str) -> Any:
+        # Pass any other method calls directly to the real Alpaca client
         return getattr(self._alpaca, item)
 
     def submit_order(self, *args, **kwargs):
-        # alpaca-trade-api supports submit_order(symbol=..., qty=..., side=..., type=..., time_in_force=...)
+        # Extract arguments to log them
         symbol = kwargs.get("symbol") if "symbol" in kwargs else (args[0] if len(args) > 0 else None)
         qty = kwargs.get("qty") if "qty" in kwargs else (args[1] if len(args) > 1 else None)
         side = kwargs.get("side") if "side" in kwargs else (args[2] if len(args) > 2 else None)
 
-        # record immediately (MVP). Price unknown for market orders.
+        # 1. Log to Database
         try:
             if symbol and qty and side:
                 record_order_submission(
@@ -76,23 +89,25 @@ class AlpacaProxy:
                     symbol=str(symbol),
                     side=str(side).upper(),
                     quantity=int(qty),
-                    price=None,
+                    price=None, # Market orders have no fixed price at submission
                     meta={"source": "submit_order", "kwargs": {k: str(v) for k, v in kwargs.items()}},
                 )
         except Exception:
-            # Never block order placement due to history issues
-            pass
+            pass # Don't crash if logging fails
 
+        # 2. Send Discord Alert
         try:
             if self._webhook and symbol and qty and side:
                 send_discord(self._webhook, f"Bot {self._bot_id}: {str(side).upper()} {qty} {symbol} (market)")
         except Exception:
             pass
 
+        # 3. Execute Real Order
         return self._alpaca.submit_order(*args, **kwargs)
 
 
 class BotThread:
+    """Holds the Thread object and a Stop Event signal for a specific bot."""
     def __init__(self, bot_id: str, stop_event: threading.Event, thread: threading.Thread):
         self.bot_id = bot_id
         self.stop_event = stop_event
@@ -101,30 +116,31 @@ class BotThread:
 
 class BotRunner:
     """
-    Manages multiple bot instances.
-    Each bot runs in its own thread and is isolated.
-
-    Runtime behavior:
-    - Bots only operate during US market hours (per Alpaca clock).
-    - Outside market hours, bots sleep until next open (but remain stoppable).
-    - Tick cadence is tied to the strategy timeframe (with safe caps).
+    Manager Class.
+    Methods:
+    - start_bot(config): Spawns a new thread.
+    - stop_bot(id): Signals a thread to stop.
+    - is_running(id): Checks status.
     """
 
     def __init__(self):
         self._bots: Dict[str, BotThread] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # Prevents race conditions
 
     def is_running(self, bot_id: str) -> bool:
+        """Checks if a bot thread exists and is alive."""
         with self._lock:
             bt = self._bots.get(bot_id)
             return bool(bt and bt.thread.is_alive())
 
     def start_bot(self, bot_row: Dict[str, Any]) -> None:
+        """Starts a new bot in a separate thread."""
         bot_id = bot_row["bot_id"]
         if self.is_running(bot_id):
             return
 
         stop_event = threading.Event()
+        # The target function is `_run_bot_loop`
         t = threading.Thread(target=self._run_bot_loop, args=(bot_row, stop_event), daemon=True)
         with self._lock:
             self._bots[bot_id] = BotThread(bot_id, stop_event, t)
@@ -133,6 +149,7 @@ class BotRunner:
         t.start()
 
     def stop_bot(self, bot_id: str) -> None:
+        """Gracefully stops a bot."""
         with self._lock:
             bt = self._bots.get(bot_id)
 
@@ -140,10 +157,11 @@ class BotRunner:
             db.update_bot_status(bot_id, "stopped")
             return
 
+        # Signal the loop to stop
         bt.stop_event.set()
         db.update_bot_status(bot_id, "stopping")
 
-        # allow thread to exit
+        # Wait for thread to finish current task
         bt.thread.join(timeout=15)
 
         with self._lock:
@@ -152,9 +170,14 @@ class BotRunner:
         db.update_bot_status(bot_id, "stopped")
 
     def _run_bot_loop(self, bot_row: Dict[str, Any], stop_event: threading.Event) -> None:
+        """
+        THE MAIN INFINITE LOOP.
+        This runs inside the thread for as long as the bot is active.
+        """
         bot_id = bot_row["bot_id"]
         user_id = bot_row["user_id"]
 
+        # 1. Fetch Credentials
         settings = db.get_user_settings(user_id)
         alpaca_key = settings.get("alpaca_key_id")
         alpaca_secret = settings.get("alpaca_secret_key")
@@ -166,10 +189,11 @@ class BotRunner:
             send_discord(webhook, f"Bot {bot_id} error: missing Alpaca keys.")
             return
 
+        # 2. Setup Client
         alpaca_raw = make_alpaca_client(alpaca_key, alpaca_secret, alpaca_base)
         alpaca = AlpacaProxy(alpaca_raw, user_id=user_id, bot_id=bot_id, webhook=webhook)
 
-        # Build BotConfig from DB row
+        # 3. Configure Strategy
         strategy_id = bot_row["strategy_id"]
         symbols = json.loads(bot_row["symbols_json"])
         params = json.loads(bot_row["params_json"])
@@ -188,12 +212,14 @@ class BotRunner:
         send_discord(webhook, f"Bot started: {bot_cfg.name or bot_cfg.bot_id} strategy={strategy_id}")
         db.update_bot_status(bot_id, "running")
 
-        # main loop
+        # 4. Loop until Stop Signal
         while not stop_event.is_set():
             try:
+                # Get current market status (Open/Closed)
                 ctx = make_tick_context(alpaca)
 
-                # Outside market hours: sleep until next open (but remain stoppable).
+                # NOTE: Logic to sleep when market is closed is commented out here, 
+                # but typically you would uncomment it to save resources.
 #               if not ctx.is_market_open:
  #                   db.update_bot_status(bot_id, "sleeping")
   #                  if ctx.next_open_utc and ctx.now_utc:
@@ -205,22 +231,21 @@ class BotRunner:
         #            stop_event.wait(timeout=sleep_s)
          #           continue
 
-                # Market is open
                 db.update_bot_status(bot_id, "running")
 
-                # Strategy 1: enforce end-of-day close if we are close to market close.
+                # Special Check: Close daily positions 10 mins before market close
                 if isinstance(strategy, DailyMeanReversionTopLosers) and ctx.is_market_open and ctx.next_close_utc and ctx.now_utc:
                     mins_to_close = (ctx.next_close_utc - ctx.now_utc).total_seconds() / 60.0
                     if 0 <= mins_to_close <= 10:
                         strategy.close_all_at_day_end()
 
-                # Run strategy tick
+                # --- EXECUTE STRATEGY ---
                 strategy.tick(ctx)
 
-                # Sleep tied to timeframe (with safe cap while market open)
+                # Sleep
                 tf = str(bot_cfg.strategy.params.get("timeframe", "5Min"))
                 sleep_s = float(_bar_seconds(tf))
-                # cap large sleeps while market open to keep close handling responsive
+                # Cap sleep at 15 mins so the bot status updates occasionally
                 sleep_s = min(sleep_s, 15 * 60.0)
 
                 stop_event.wait(timeout=sleep_s)
@@ -228,7 +253,6 @@ class BotRunner:
             except Exception as e:
                 db.update_bot_status(bot_id, "error")
                 send_discord(webhook, f"Bot {bot_id} error: {e}")
-                # backoff but keep stoppable
-                stop_event.wait(timeout=10.0)
+                stop_event.wait(timeout=10.0) # Short wait on error before retrying
 
         send_discord(webhook, f"Bot stopped: {bot_cfg.name or bot_cfg.bot_id}")

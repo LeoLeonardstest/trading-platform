@@ -1,29 +1,18 @@
 from __future__ import annotations
 """client/app.py
 
-Finished desktop UI for the Trading Platform (University Project)
-Python-only, Tkinter-based.
+FILE OVERVIEW:
+This is the Desktop UI Application (Frontend).
+It uses the `tkinter` library to create windows, buttons, and charts.
 
-Scope: UI + wiring points (no real trading logic).
+Key Components:
+1. `TradingApp`: The main window controller.
+2. `LoginPage`: Handles user authentication.
+3. `MainLayout`: The dashboard with Sidebar navigation.
+4. Pages: Home, Test (Backtest), Bots, History, Settings.
 
-Key goal:
-- The UI already has ALL inputs/outputs and clear "hooks" so other AI/code
-  can implement the backend/backtests and simply plug results into the UI.
-
-Backtest contract (as provided by you):
-  run_backtest_from_yahoo(bot: BotConfig, start: datetime, end: datetime) -> BacktestResult
-and BacktestResult contains:
-  equity_curve (pd.Series), KPIs, trades (List[Trade]).
-
-Notes:
-- This file does NOT import your backtest engine or backend API on purpose.
-  It exposes two hooks:
-    - on_run_backtest(): call your local backtest and then call populate_backtest_result(result)
-    - on_start_bot()/on_stop_bot(): call backend API endpoints
-
-Dependencies:
-- tkinter (built-in)
-- matplotlib (optional, for equity curve chart)
+This file does NOT contain trading logic. It captures user input and sends it
+to the backend (via `api.py`) or the backtester (via `backtest.py`).
 """
 
 import sys
@@ -50,12 +39,13 @@ WINDOW_SIZE = "1280x780"
 DATE_FMT = "%Y-%m-%d"  # UI date input format
 
 class TradingApp(tk.Tk):
+    """The Main Application Window."""
     def __init__(self):
         super().__init__()
         self.title("Trading Platform")
         self.geometry("1280x780")
 
-        self.api = None
+        self.api = None # Stores the connection to the backend
         self.user = None
         self.user_id = None
 
@@ -65,6 +55,7 @@ class TradingApp(tk.Tk):
         self.show_login()
 
     def clear(self):
+        """Removes all widgets from the current view."""
         for w in self.container.winfo_children():
             w.destroy()
 
@@ -78,6 +69,7 @@ class TradingApp(tk.Tk):
 
 
 class LoginPage(tk.Frame):
+    """Handles Login and Registration."""
     def __init__(self, parent, app: TradingApp):
         super().__init__(parent)
         self.app = app
@@ -108,7 +100,7 @@ class LoginPage(tk.Frame):
 
     def on_login(self):
         try:
-            base_url = "http://35.159.124.180:8000"
+            base_url = "http://35.159.124.180:8000" # NOTE: Change this IP if your server IP changes
             self.app.api = ApiClient(base_url)
 
             username = self.username.get().strip()
@@ -147,6 +139,7 @@ class LoginPage(tk.Frame):
                 messagebox.showerror("Register Error", str(e))
 
 class MainLayout(tk.Frame):
+    """The layout for the logged-in area (Sidebar + Content)."""
     def __init__(self, parent, app: TradingApp):
         super().__init__(parent)
         self.app = app
@@ -192,7 +185,7 @@ class MainLayout(tk.Frame):
             w.destroy()
 
     # -----------------------------
-    # 1. REAL DASHBOARD
+    # 1. DASHBOARD PAGE
     # -----------------------------
     def show_home(self):
         self.clear_content()
@@ -200,8 +193,7 @@ class MainLayout(tk.Frame):
 
         # 1. Fetch Real Data
         try:
-            dash_data = self.app.api.get_dashboard()  #
-            # Dashboard returns: { "account": {...}, "bots_total": int, "bots_running": int }
+            dash_data = self.app.api.get_dashboard()
             
             # Helper to safely get nested account data
             acct = dash_data.get("account") or {}
@@ -261,7 +253,7 @@ class MainLayout(tk.Frame):
 
         # Fetch full bot list to populate this table
         try:
-            all_bots = self.app.api.list_bots() #
+            all_bots = self.app.api.list_bots() 
             # Filter for running/starting/stopping
             active_statuses = ["running", "starting", "stopping", "sleeping"]
             
@@ -276,8 +268,9 @@ class MainLayout(tk.Frame):
                     ))
         except Exception:
             pass # Fail silently for the list if dashboard loaded
+            
     # -----------------------------
-    # Test (Backtesting)
+    # 2. BACKTEST PAGE
     # -----------------------------
     def show_test(self):
         self.clear_content()
@@ -293,6 +286,7 @@ class MainLayout(tk.Frame):
             justify="left",
         ).pack(pady=(0, 10))
 
+        # Input Form
         input_panel = tk.LabelFrame(self.content, text="Backtest Inputs")
         input_panel.pack(fill=tk.X, padx=12, pady=8)
 
@@ -351,6 +345,7 @@ class MainLayout(tk.Frame):
             fg="#666",
         ).pack(side=tk.LEFT, padx=10)
 
+        # Results Display
         results = tk.Frame(self.content)
         results.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
 
@@ -416,6 +411,7 @@ class MainLayout(tk.Frame):
         self._render_backtest_params()
 
     def _render_backtest_params(self):
+        """Dynamically renders input fields based on strategy selection."""
         for w in self.bt_params_frame.winfo_children():
             w.destroy()
 
@@ -781,7 +777,7 @@ class MainLayout(tk.Frame):
             pass
 
     # -----------------------------
-    # 3. REAL HISTORY PAGE
+    # 4. HISTORY PAGE
     # -----------------------------
     def show_history(self):
         self.clear_content()
@@ -825,7 +821,7 @@ class MainLayout(tk.Frame):
             messagebox.showerror("Error", f"Could not load history: {e}")
 
     # -----------------------------
-    # 4. SETTINGS PAGE (Auto-Fill)
+    # 5. SETTINGS PAGE (Auto-Fill)
     # -----------------------------
     def show_settings(self):
         self.clear_content()

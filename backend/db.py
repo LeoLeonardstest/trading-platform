@@ -1,4 +1,17 @@
-# backend/db.py
+"""backend/db.py
+
+FILE OVERVIEW:
+This file handles all database interactions.
+It uses SQLite (a simple file-based database) to store:
+- Users (login info)
+- Tokens (sessions)
+- User Settings (API keys)
+- Bots (configurations and status)
+- Trades (history)
+
+Functions here correspond to SQL commands (INSERT, SELECT, UPDATE, DELETE).
+"""
+
 from __future__ import annotations
 
 import os
@@ -11,16 +24,21 @@ DB_PATH = os.getenv("DB_PATH", "backend.sqlite3")
 
 
 def _connect() -> sqlite3.Connection:
+    """Opens a connection to the SQLite file."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = sqlite3.Row # Allows accessing columns by name
     return conn
 
 
 def init_db() -> None:
+    """
+    Creates the database tables if they don't exist yet.
+    Runs on server startup.
+    """
     conn = _connect()
     cur = conn.cursor()
 
-    # Users + auth token (simple token auth for MVP)
+    # Users Table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -32,6 +50,7 @@ def init_db() -> None:
         """
     )
 
+    # Auth Tokens
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tokens (
@@ -43,7 +62,7 @@ def init_db() -> None:
         """
     )
 
-    # Per-user settings (alpaca keys + discord webhook)
+    # User Settings (API Keys)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS user_settings (
@@ -58,7 +77,7 @@ def init_db() -> None:
         """
     )
 
-    # Bot configs
+    # Bot Configurations
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS bots (
@@ -77,7 +96,7 @@ def init_db() -> None:
         """
     )
 
-    # Trades / order submissions
+    # Trade History
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS trades (
@@ -156,6 +175,7 @@ def upsert_user_settings(
     alpaca_base_url: Optional[str],
     discord_webhook: Optional[str],
 ) -> None:
+    """Inserts or Updates user settings."""
     conn = _connect()
     conn.execute(
         """
@@ -185,6 +205,7 @@ def get_user_settings(user_id: str) -> Dict[str, Any]:
     conn = _connect()
     row = conn.execute("SELECT * FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
+    # Return empty dict structure if no settings found
     return dict(row) if row else {
         "user_id": user_id,
         "alpaca_key_id": None,
@@ -247,9 +268,7 @@ def get_bot(bot_id: str) -> Optional[Dict[str, Any]]:
 
 def delete_bot(bot_id: str) -> None:
     conn = _connect()
-    # Delete associated trades first (optional, keeps DB clean)
     conn.execute("DELETE FROM trades WHERE bot_id = ?", (bot_id,))
-    # Delete the bot
     conn.execute("DELETE FROM bots WHERE bot_id = ?", (bot_id,))
     conn.commit()
     conn.close()

@@ -1,14 +1,13 @@
 """client/backtest.py
 
-Backtest runner that matches your UI contract:
+FILE OVERVIEW:
+This file coordinates the backtesting process.
+It connects 3 things:
+1. Data fetching (yahoo_data.py)
+2. Strategy Logic (strategies.py)
+3. Results calculation (KPIs like Return %, Drawdown)
 
-  run_backtest_from_yahoo(bot: BotConfig, start: datetime, end: datetime) -> BacktestResult
-
-It uses:
-- client/yahoo_data.py to download data
-- client/strategies.py to execute strategy logic
-
-This file is local-only (desktop).
+The UI calls `run_backtest_from_yahoo` to start this process.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from client import strategies
 
 @dataclass
 class BacktestResult:
+    """Container for the final results of a simulation."""
     strategy_id: str
     symbols: List[str]
     start: datetime
@@ -44,6 +44,7 @@ class BacktestResult:
 
 
 def _compute_kpis(equity_curve: pd.Series, initial_capital: float) -> Dict[str, float]:
+    """Calculates performance metrics (Profit, Loss, Drawdown)."""
     if equity_curve is None or equity_curve.empty:
         final_equity = float(initial_capital)
         return {
@@ -55,7 +56,7 @@ def _compute_kpis(equity_curve: pd.Series, initial_capital: float) -> Dict[str, 
     final_equity = float(equity_curve.iloc[-1])
     total_return_pct = ((final_equity / float(initial_capital)) - 1.0) * 100.0
 
-    # max drawdown
+    # max drawdown (peak-to-trough decline)
     running_max = equity_curve.cummax()
     dd = (equity_curve / running_max) - 1.0
     max_dd = float(dd.min()) * 100.0  # negative
@@ -68,21 +69,11 @@ def _compute_kpis(equity_curve: pd.Series, initial_capital: float) -> Dict[str, 
 
 
 def run_backtest_from_yahoo(bot: BotConfig, start: datetime, end: datetime) -> BacktestResult:
-    """Main entry called by UI.
-
-    Requirements (UI must provide):
-      - bot.bot_id, bot.user_id
-      - bot.symbols
-      - bot.capital
-      - bot.strategy.strategy_id
-      - bot.strategy.params
-      - start/end datetimes
-
-    This function:
-      1) loads OHLCV from Yahoo
-      2) calls the strategy backtest function
-      3) computes KPIs
-      4) returns BacktestResult
+    """
+    Main function called by UI.
+    1. Downloads data for all symbols.
+    2. Runs the selected strategy.
+    3. Calculates results and returns them.
     """
 
     sid = bot.strategy.strategy_id
@@ -106,7 +97,7 @@ def run_backtest_from_yahoo(bot: BotConfig, start: datetime, end: datetime) -> B
                 raise ValueError(f"Missing {col} for {sym}")
         data_by_symbol[sym] = df
 
-    # Dispatch
+    # Dispatch to the correct strategy function
     if sid == "mean_reversion_losers":
         trades, equity = strategies.backtest_mean_reversion_losers(bot, data_by_symbol)
     elif sid == "moving_average":
@@ -118,6 +109,7 @@ def run_backtest_from_yahoo(bot: BotConfig, start: datetime, end: datetime) -> B
     else:
         raise KeyError(f"Unknown strategy_id: {sid}")
 
+    # Compute Statistics
     k = _compute_kpis(equity, bot.capital)
 
     return BacktestResult(

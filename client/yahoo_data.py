@@ -1,11 +1,13 @@
 """client/yahoo_data.py
 
-Yahoo Finance OHLCV loader for backtests.
+FILE OVERVIEW:
+This module is responsible for fetching historical stock data (OHLCV).
+It uses the `yfinance` library to download data from Yahoo Finance.
 
-Design goals:
-- Download using yfinance
-- Optional local CSV cache to speed up repeated backtests
-- Return a pandas DataFrame with datetime index and OHLCV columns
+It includes a caching system:
+- When you download data for "AAPL", it saves it as a CSV file in a `.cache` folder.
+- Next time you run a test, it reads the CSV instead of downloading again.
+- This speeds up testing and prevents being blocked by Yahoo.
 """
 
 from __future__ import annotations
@@ -25,15 +27,18 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class YahooLoadOptions:
-    cache_dir: Path = Path("./.cache/yahoo")
-    use_cache: bool = True
+    """Configuration for data loading."""
+    cache_dir: Path = Path("./.cache/yahoo") # Directory to save CSVs
+    use_cache: bool = True                   # Whether to use the cache or force download
 
 
 def _cache_path(symbol: str, interval: str, start: str, end: str, cache_dir: Path) -> Path:
+    """Generates a unique filename for the cache based on symbol and dates."""
     safe = symbol.replace("/", "_")
     return cache_dir / f"{safe}__{interval}__{start}__{end}.csv"
 
 def _download_with_retries(symbol: str, start: str, end: str, interval: str, tries: int = 3) -> pd.DataFrame:
+    """Attempts to download data, retrying if it fails (e.g. network error)."""
     last_err = None
     for i in range(tries):
         try:
@@ -51,15 +56,14 @@ def _download_with_retries(symbol: str, start: str, end: str, interval: str, tri
                 return df
         except Exception as e:
             last_err = e
-        time.sleep(1.5 * (i + 1))
+        time.sleep(1.5 * (i + 1)) # Wait longer after each failure
     if last_err:
         raise last_err
     return pd.DataFrame()
 
 def _to_yf_interval(timeframe: str) -> str:
     """
-    Map shared/live-style timeframes to yfinance interval strings.
-    yfinance expects: 1m,5m,15m,30m,1h,1d
+    Maps our internal timeframe format (e.g. "1Day") to Yahoo's format (e.g. "1d").
     """
     tf = (timeframe or "1D").strip()
     tf_lower = tf.lower()
@@ -92,10 +96,8 @@ def _to_yf_interval(timeframe: str) -> str:
 
 def _read_cached_csv(path: Path) -> pd.DataFrame:
     """
-    Robust cache reader:
-    - Supports old caches with 'Date' column
-    - Supports caches with unnamed first column
-    - Supports current caches with 'Datetime' column
+    Reads a CSV file from the cache. 
+    It handles different date column names to ensure compatibility with older cache files.
     """
     # Read header first without parsing to detect columns
     preview = pd.read_csv(path, nrows=1)
@@ -127,6 +129,13 @@ def fetch_ohlcv(
     timeframe: str = "1D",
     options: Optional[YahooLoadOptions] = None,
 ) -> pd.DataFrame:
+    """
+    Main function to get data.
+    1. Check cache.
+    2. If missing, download from Yahoo.
+    3. Clean and normalize data.
+    4. Save to cache.
+    """
     if yf is None:
         raise ImportError("yfinance is required. pip install yfinance")
 
@@ -141,7 +150,7 @@ def fetch_ohlcv(
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    # 1. LEJUPIELĀDE
+    # 1. DOWNLOAD (LEJUPIELĀDE)
     df = yf.download(
         tickers=symbol,
         start=start,
@@ -153,25 +162,27 @@ def fetch_ohlcv(
     print(f"DEBUG: Saņemtas {len(df)} rindas")
     print(f"DEBUG: Kolonnu nosaukumi: {df.columns.tolist()}")
 
-    # 2. PĀRBAUDE: Vai vispār ir dati (Yahoo 60 dienu limits)
+    # 2. CHECK: Is data empty? (PĀRBAUDE)
     if df is None or df.empty:
         raise ValueError(f"KĻŪDA: Yahoo Finance neatgrieza datus priekš {symbol}. "
                          f"Pārbaudi, vai 5m datus neprasi senākus par 60 dienām!")
 
-    # 3. FIX: Jaunais yfinance MultiIndex (saplacinām kolonnas)
-    # Ja kolonnas ir ('MSFT', 'Open'), pārvēršam tās par 'Open'
+    # 3. FIX: Handle MultiIndex columns from new yfinance versions
+    # If columns look like ('MSFT', 'Open'), flatten them to just 'Open'
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    # 2. Drošības pēc noņemam tukšumus no nosaukumiem
+        
+    # Clean column names (remove whitespace)
     df.columns = [str(c).strip() for c in df.columns]
-    # 4. Standartizējam indeksu
+    
+    # 4. Standardize Index
     df.index.name = "Datetime"
 
-    # 5. Filtrējam tikai vajadzīgās kolonnas
+    # 5. Filter only required columns
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[keep].copy()
 
-    # 6. Pēdējā pārbaude pirms atgriešanas
+    # 6. Final validity check
     if df.empty or len(df) < 2:
         raise ValueError("Datu rāmis pēc apstrādes ir tukšs vai par īsu backtestam.")
 

@@ -1,16 +1,17 @@
 """client/strategies.py
 
-Backtest versions of the strategies.
+FILE OVERVIEW:
+This file contains the core logic for the **Backtesting Engine**.
+Unlike the live bot which runs on the server, this code runs locally on your computer.
+It simulates how simulated trades would have performed in the past using historical data.
 
-Design:
-- Uses OHLCV bars loaded from Yahoo Finance.
-- Simple portfolio simulator:
-  - one cash account
-  - positions per symbol
-  - market fills at bar close (MVP)
-- Produces:
-  - trades: List[shared.models.Trade]
-  - equity: pd.Series indexed by bar timestamp
+It contains:
+1. Helper functions to manage data (sorting, validating).
+2. The logic for 4 specific trading strategies:
+   - Mean Reversion (Top Losers)
+   - Moving Average Crossover
+   - RSI Mean Reversion
+   - MACD Trend
 """
 
 from __future__ import annotations
@@ -27,25 +28,40 @@ from shared.models import BotConfig, Trade, OrderSide
 
 @dataclass
 class Position:
+    """
+    A simple data structure to track what we own during the simulation.
+    qty: How many shares we hold.
+    avg_price: The average price we paid for them.
+    """
     qty: int = 0
     avg_price: float = 0.0
 
 def _has_series_data(s) -> bool:
+    """Checks if a pandas Series exists and has data."""
     return isinstance(s, pd.Series) and (not s.empty)
 
 def _ensure_sorted(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensures that the historical data is sorted by date (Oldest -> Newest).
+    If dates are out of order, the strategy simulation would fail.
+    """
     if not df.index.is_monotonic_increasing:
         return df.sort_index()
     return df
 
 
 def _bar_close(df: pd.DataFrame) -> pd.Series:
+    """Extracts the 'Close' price column from the dataframe."""
     if "Close" not in df.columns:
         raise ValueError("Missing Close column")
     return df["Close"].astype(float)
 
 
 def _mk_trade(bot: BotConfig, symbol: str, side: OrderSide, qty: int, price: float, ts: datetime) -> Trade:
+    """
+    Creates a 'Trade' object to record a transaction in our history.
+    Since this is a simulation, we generate a fake random UUID for the trade ID.
+    """
     return Trade(
         trade_id=str(uuid4()),
         bot_id=bot.bot_id,
@@ -60,16 +76,25 @@ def _mk_trade(bot: BotConfig, symbol: str, side: OrderSide, qty: int, price: flo
 
 def _apply_stop_tp(entry_price: float, current_price: float, stop_loss_pct: float, take_profit_pct: float) -> bool:
     """
-    Return True if an exit should be triggered due to stop-loss or take-profit.
+    Checks if a position should be closed based on Risk Management rules.
+    
+    Returns True (Sell Signal) if:
+    1. The price dropped below the Stop Loss threshold (limit losses).
+    2. The price rose above the Take Profit threshold (secure gains).
     """
     if entry_price <= 0:
         return False
+    
+    # Check Stop Loss
     if stop_loss_pct and stop_loss_pct > 0:
         if current_price <= entry_price * (1.0 - float(stop_loss_pct)):
             return True
+            
+    # Check Take Profit
     if take_profit_pct and take_profit_pct > 0:
         if current_price >= entry_price * (1.0 + float(take_profit_pct)):
             return True
+            
     return False
 
 
@@ -82,19 +107,20 @@ def backtest_mean_reversion_losers(
     data_by_symbol: Dict[str, pd.DataFrame],
 ) -> Tuple[List[Trade], pd.Series]:
     """
-    Daily strategy:
-    - Use daily bars (recommended timeframe 1D).
-    - At each day open: pick N losers based on previous-day return from universe.
-    - Buy at the day's Open price.
-    - Sell all at the day's Close price.
+    LOGIC:
+    1. Look at yesterday's performance for all symbols.
+    2. Identify the top N 'Losers' (stocks that dropped the most).
+    3. Buy them at today's Open price, betting they will bounce back.
+    4. Sell them at today's Close price (Intraday trade).
     """
     params = bot.strategy.params or {}
     losers_to_buy = int(params.get("losers_to_buy", 5))
     losers_to_buy = max(1, losers_to_buy)
 
-    # Build a combined daily index from all symbols (intersection)
+    # Clean and sort data for all symbols
     dfs = {s: _ensure_sorted(df) for s, df in data_by_symbol.items()}
-    # Use the first symbol's index as base, then intersect
+    
+    # Find the common dates where we have data for ALL symbols
     base_index = None
     for df in dfs.values():
         base_index = df.index if base_index is None else base_index.intersection(df.index)
@@ -103,20 +129,22 @@ def backtest_mean_reversion_losers(
 
     trades: List[Trade] = []
     equity_points = []
-
     cash = float(bot.capital)
 
-    for i in range(1, len(base_index)):  # need prev day
-        ts = base_index[i]
-        prev_ts = base_index[i - 1]
+    # Loop through each day (starting from index 1 because we need previous day's data)
+    for i in range(1, len(base_index)):
+        ts = base_index[i]       # Today
+        prev_ts = base_index[i - 1] # Yesterday
 
-        # compute previous-day return for each symbol: (prev_close - prev_open)/prev_open or (prev_close/prev_prev_close -1)?
-        # Use close-to-close return: (prev_close / prev_prev_close - 1)
-        # For i >=2, use prev close vs prevprev close; else use prev open->close
+        # --- STEP 1: Calculate Returns ---
         returns = []
         for sym, df in dfs.items():
             if ts not in df.index or prev_ts not in df.index:
                 continue
+            
+            # Calculate % change. 
+            # Logic: If we have 2 days of history, we check PrevClose vs PrevPrevClose.
+            # Otherwise we use PrevOpen vs PrevClose.
             if i >= 2:
                 prevprev_ts = base_index[i - 2]
                 if prevprev_ts in df.index:
@@ -130,11 +158,14 @@ def backtest_mean_reversion_losers(
         if not returns:
             continue
 
-        # pick losers (lowest returns)
+        # --- STEP 2: Rank Losers ---
+        # Sort by return (lowest first)
         returns.sort(key=lambda x: x[1])
+        # Pick top N symbols
         picked = [sym for sym, _ in returns[: min(losers_to_buy, len(returns))]]
 
-        # allocate equally across picked at today's open
+        # --- STEP 3: Execute Trades ---
+        # Split cash equally among the picked stocks
         alloc = cash / float(len(picked)) if picked else 0.0
 
         day_open_cost = 0.0
@@ -142,26 +173,31 @@ def backtest_mean_reversion_losers(
 
         for sym in picked:
             df = dfs[sym]
-            open_px = float(df.loc[ts, "Open"])
-            close_px = float(df.loc[ts, "Close"])
-            if open_px <= 0:
-                continue
+            open_px = float(df.loc[ts, "Open"])   # Buy Price
+            close_px = float(df.loc[ts, "Close"]) # Sell Price
+            
+            if open_px <= 0: continue
+            
+            # Calculate quantity we can afford
             qty = int(alloc // open_px)
-            if qty <= 0:
-                continue
+            if qty <= 0: continue
+            
+            # BUY Transaction
             cost = qty * open_px
             cash -= cost
             day_open_cost += cost
             trades.append(_mk_trade(bot, sym, OrderSide.BUY, qty, open_px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
-            # sell end of day
+            
+            # SELL Transaction (End of day)
             cash += qty * close_px
             day_close_value += qty * close_px
             trades.append(_mk_trade(bot, sym, OrderSide.SELL, qty, close_px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
 
-        # equity at end of day
+        # Record daily equity (cash balance)
         equity = cash
         equity_points.append((ts, equity))
 
+    # Format the Equity Curve for the chart
     if not equity_points:
         equity_curve = pd.Series([float(bot.capital)], index=[base_index[-1]])
     else:
@@ -178,6 +214,12 @@ def backtest_moving_average(
     bot: BotConfig,
     data_by_symbol: Dict[str, pd.DataFrame],
 ) -> Tuple[List[Trade], pd.Series]:
+    """
+    LOGIC:
+    1. Calculate two averages: Short (Fast) and Long (Slow).
+    2. Buy when Short crosses ABOVE Long (Golden Cross).
+    3. Sell when Short crosses BELOW Long (Death Cross).
+    """
     params = bot.strategy.params or {}
     ma_type = str(params.get("ma_type", "SMA")).upper()
     short_p = int(params.get("short_period", 20))
@@ -185,16 +227,18 @@ def backtest_moving_average(
     stop_loss = float(params.get("stop_loss_pct", 0.0) or 0.0)
     take_profit = float(params.get("take_profit_pct", 0.0) or 0.0)
 
+    # Ensure Long period is at least 1 greater than Short
     if long_p <= short_p:
         long_p = short_p + 1
 
     dfs = {s: _ensure_sorted(df) for s, df in data_by_symbol.items()}
-    # build a global timeline union
+    # Create a unified timeline (union of all dates)
     index = None
     for df in dfs.values():
         index = df.index if index is None else index.union(df.index)
     index = index.sort_values()
 
+    # Track positions per symbol
     positions: Dict[str, Position] = {s: Position() for s in dfs.keys()}
     entry_price: Dict[str, float] = {s: 0.0 for s in dfs.keys()}
 
@@ -202,7 +246,7 @@ def backtest_moving_average(
     trades: List[Trade] = []
     equity_vals = []
 
-    # Precompute indicators per symbol
+    # --- Precompute Indicators ---
     ind = {}
     for sym, df in dfs.items():
         close = _bar_close(df)
@@ -214,40 +258,37 @@ def backtest_moving_average(
             l_ma = close.rolling(window=long_p, min_periods=long_p).mean()
         ind[sym] = (s_ma, l_ma, close)
 
-    # Equal capital per symbol for simplicity
     symbols = list(dfs.keys())
-    per_symbol_budget = cash / max(1, len(symbols))
+    per_symbol_budget = cash / max(1, len(symbols)) # Equal allocation
 
+    # --- Main Time Loop ---
     for ts in index:
+        # Update Portfolio Value (Mark to Market)
         equity = cash
-        # add mark-to-market
         for sym, pos in positions.items():
             if pos.qty > 0:
                 df = dfs[sym]
                 if ts in df.index:
                     px = float(df.loc[ts, "Close"])
                 else:
-                    # last known close
-                    px = float(ind[sym][2].loc[:ts].iloc[-1])
+                    px = float(ind[sym][2].loc[:ts].iloc[-1]) # Last known price
                 equity += pos.qty * px
 
         equity_vals.append((ts, equity))
 
+        # Check signals for each symbol
         for sym in symbols:
             df = dfs[sym]
-            if ts not in df.index:
-                continue
+            if ts not in df.index: continue
 
             s_ma, l_ma, close = ind[sym]
-            if ts not in s_ma.index or ts not in l_ma.index:
-                continue
-            if pd.isna(s_ma.loc[ts]) or pd.isna(l_ma.loc[ts]):
-                continue
+            if ts not in s_ma.index or ts not in l_ma.index: continue
+            if pd.isna(s_ma.loc[ts]) or pd.isna(l_ma.loc[ts]): continue
 
             px = float(df.loc[ts, "Close"])
             pos = positions[sym]
 
-            # stop/tp exit
+            # 1. Check Stop Loss / Take Profit
             if pos.qty > 0 and _apply_stop_tp(entry_price[sym], px, stop_loss, take_profit):
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
@@ -255,7 +296,8 @@ def backtest_moving_average(
                 entry_price[sym] = 0.0
                 continue
 
-            # crossover logic
+            # 2. Check Crossover Logic
+            # BUY if Short > Long (and we don't have position)
             if pos.qty == 0 and float(s_ma.loc[ts]) > float(l_ma.loc[ts]):
                 qty = int(per_symbol_budget // px)
                 if qty > 0:
@@ -263,6 +305,8 @@ def backtest_moving_average(
                     pos.qty = qty
                     entry_price[sym] = px
                     trades.append(_mk_trade(bot, sym, OrderSide.BUY, qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
+            
+            # SELL if Short < Long (and we have position)
             elif pos.qty > 0 and float(s_ma.loc[ts]) < float(l_ma.loc[ts]):
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
@@ -278,6 +322,7 @@ def backtest_moving_average(
 # =============================================================================
 
 def _rsi(close: pd.Series, period: int) -> pd.Series:
+    """Calculates Relative Strength Index (0-100)."""
     delta = close.diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
@@ -292,6 +337,12 @@ def backtest_rsi_reversion(
     bot: BotConfig,
     data_by_symbol: Dict[str, pd.DataFrame],
 ) -> Tuple[List[Trade], pd.Series]:
+    """
+    LOGIC:
+    1. Calculate RSI.
+    2. Buy when RSI is Low (Oversold) -> Expecting price to go UP.
+    3. Sell when RSI is High (Overbought) -> Expecting price to go DOWN.
+    """
     params = bot.strategy.params or {}
     period = int(params.get("rsi_period", 14))
     oversold = int(params.get("oversold", 30))
@@ -320,7 +371,6 @@ def backtest_rsi_reversion(
         indicators[sym] = (_rsi(close, period), close)
 
     for ts in index:
-        # equity mark-to-market
         equity = cash
         for sym, pos in positions.items():
             if pos.qty > 0:
@@ -331,15 +381,14 @@ def backtest_rsi_reversion(
 
         for sym in symbols:
             df = dfs[sym]
-            if ts not in df.index:
-                continue
+            if ts not in df.index: continue
             rsi_s, close = indicators[sym]
-            if ts not in rsi_s.index or pd.isna(rsi_s.loc[ts]):
-                continue
+            if ts not in rsi_s.index or pd.isna(rsi_s.loc[ts]): continue
 
             px = float(df.loc[ts, "Close"])
             pos = positions[sym]
 
+            # Risk Checks
             if pos.qty > 0 and _apply_stop_tp(entry_price[sym], px, stop_loss, take_profit):
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
@@ -348,6 +397,8 @@ def backtest_rsi_reversion(
                 continue
 
             r = float(rsi_s.loc[ts])
+            
+            # Buy Signal: RSI <= Oversold
             if pos.qty == 0 and r <= oversold:
                 qty = int(per_symbol_budget // px)
                 if qty > 0:
@@ -355,6 +406,8 @@ def backtest_rsi_reversion(
                     pos.qty = qty
                     entry_price[sym] = px
                     trades.append(_mk_trade(bot, sym, OrderSide.BUY, qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
+            
+            # Sell Signal: RSI >= Overbought
             elif pos.qty > 0 and r >= overbought:
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
@@ -373,6 +426,13 @@ def backtest_macd_trend(
     bot: BotConfig,
     data_by_symbol: Dict[str, pd.DataFrame],
 ) -> Tuple[List[Trade], pd.Series]:
+    """
+    LOGIC:
+    1. Compute MACD Line (Fast EMA - Slow EMA).
+    2. Compute Signal Line (EMA of MACD).
+    3. Buy when MACD crosses ABOVE Signal.
+    4. Sell when MACD crosses BELOW Signal.
+    """
     params = bot.strategy.params or {}
     fast_p = int(params.get("fast_period", 12))
     slow_p = int(params.get("slow_period", 26))
@@ -420,18 +480,16 @@ def backtest_macd_trend(
 
         for sym in symbols:
             df = dfs[sym]
-            if ts not in df.index:
-                continue
+            if ts not in df.index: continue
 
             macd, signal, close = macd_data[sym]
-            if ts not in macd.index or ts not in signal.index:
-                continue
-            if pd.isna(macd.loc[ts]) or pd.isna(signal.loc[ts]):
-                continue
+            if ts not in macd.index or ts not in signal.index: continue
+            if pd.isna(macd.loc[ts]) or pd.isna(signal.loc[ts]): continue
 
             px = float(df.loc[ts, "Close"])
             pos = positions[sym]
 
+            # Risk Checks
             if pos.qty > 0 and _apply_stop_tp(entry_price[sym], px, stop_loss, take_profit):
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
@@ -440,17 +498,17 @@ def backtest_macd_trend(
                 prev_rel[sym] = None
                 continue
 
+            # Calculate logic for crossover
             rel = float(macd.loc[ts]) - float(signal.loc[ts])
             prev = prev_rel[sym]
             prev_rel[sym] = rel
 
-            # Need previous to detect cross; if None, skip
-            if prev is None:
-                continue
+            if prev is None: continue
 
             crossed_up = (prev <= 0) and (rel > 0)
             crossed_down = (prev >= 0) and (rel < 0)
 
+            # Buy Signal
             if pos.qty == 0 and crossed_up:
                 qty = int(per_symbol_budget // px)
                 if qty > 0:
@@ -458,6 +516,8 @@ def backtest_macd_trend(
                     pos.qty = qty
                     entry_price[sym] = px
                     trades.append(_mk_trade(bot, sym, OrderSide.BUY, qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))
+            
+            # Sell Signal
             elif pos.qty > 0 and crossed_down:
                 cash += pos.qty * px
                 trades.append(_mk_trade(bot, sym, OrderSide.SELL, pos.qty, px, ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts))

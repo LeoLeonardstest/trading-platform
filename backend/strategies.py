@@ -1,4 +1,19 @@
-# backend/strategies.py
+"""backend/strategies.py
+
+FILE OVERVIEW:
+This file contains the **Live Trading Logic**.
+While the client side had "simulations", this code runs on the server and makes REAL trades (or paper trades) using the Alpaca API.
+
+Key Components:
+1. `LiveStrategy`: The base class that all strategies must inherit from.
+2. `StrategyTickContext`: A snapshot of the current market time and status.
+3. Specific Strategies:
+   - DailyMeanReversionTopLosers (Buys losers at open)
+   - MovingAverageTrend (Golden/Death Cross)
+   - RSIMeanReversion (Buy low, sell high)
+   - MACDTrend (Momentum)
+"""
+
 from __future__ import annotations
 
 import math
@@ -18,8 +33,10 @@ from shared.models import BotConfig
 # Timeframe normalization
 # =============================================================================
 
+# Valid Alpaca timeframes
 ALPACA_TIMEFRAMES = {"1Min", "5Min", "15Min", "30Min", "1Hour", "1Day"}
 
+# Helper map to convert "1m" -> "1Min"
 _TIMEFRAME_ALIASES = {
     "1m": "1Min",
     "1min": "1Min",
@@ -41,6 +58,10 @@ _TIMEFRAME_ALIASES = {
 }
 
 def normalize_timeframe(tf: str) -> str:
+    """
+    Converts user input (e.g. '5m') into the strict format Alpaca requires (e.g. '5Min').
+    Defaults to '5Min' if the input is unknown.
+    """
     raw = (tf or "").strip()
     if raw.upper() == "1H":
         return "1Hour"
@@ -55,6 +76,7 @@ def normalize_timeframe(tf: str) -> str:
 
 
 def _to_utc(ts: Optional[datetime]) -> datetime:
+    """Helper to ensure a datetime object is set to UTC timezone."""
     if ts is None:
         return datetime.now(timezone.utc)
     if ts.tzinfo is None:
@@ -63,6 +85,10 @@ def _to_utc(ts: Optional[datetime]) -> datetime:
 
 
 def _approx_bar_seconds(tf: str) -> int:
+    """
+    Returns how many seconds are in a specific timeframe.
+    Used to calculate how long the bot should sleep between checks.
+    """
     tf = normalize_timeframe(tf)
     return {
         "1Min": 60,
@@ -80,8 +106,8 @@ def _approx_bar_seconds(tf: str) -> int:
 
 def fetch_recent_bars(alpaca: Any, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     """
-    Return DataFrame with columns: open/high/low/close/volume; index is datetime (UTC).
-    Uses alpaca-trade-api REST.get_bars (v2).
+    Fetches historical candle data (Open, High, Low, Close) from Alpaca.
+    Returns a Pandas DataFrame formatted for easy calculation.
     """
     tf = normalize_timeframe(timeframe)
     bars = alpaca.get_bars(symbol, tf, limit=limit)
@@ -94,19 +120,20 @@ def fetch_recent_bars(alpaca: Any, symbol: str, timeframe: str, limit: int) -> p
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # If multi-index (symbol, time) -> select symbol
+    # If multi-index (symbol, time) -> select symbol specifically
     if isinstance(df.index, pd.MultiIndex):
         if symbol in df.index.get_level_values(0):
             df = df.xs(symbol)
         else:
-            # pick first symbol level
+            # pick first symbol level if exact match fails
             df = df.xs(df.index.get_level_values(0)[0])
 
     df = df.copy()
     # normalize columns to lower-case names used by Alpaca DF
     df.columns = [c.lower() for c in df.columns]
     df = df.rename(columns={"t": "time"})
-    # ensure datetime index
+    
+    # Ensure datetime index is standard UTC
     if "timestamp" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df["timestamp"], utc=True)
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -117,6 +144,11 @@ def fetch_recent_bars(alpaca: Any, symbol: str, timeframe: str, limit: int) -> p
 
 
 def last_trade_price(alpaca: Any, symbol: str, fallback_timeframe: str = "1Min") -> Optional[float]:
+    """
+    Gets the absolute latest price for a symbol.
+    1. Tries to get the last real-time trade tick.
+    2. If that fails, gets the closing price of the last 1-minute bar.
+    """
     try:
         lt = alpaca.get_last_trade(symbol)
         price = getattr(lt, "price", None) or getattr(lt, "p", None)
@@ -125,6 +157,7 @@ def last_trade_price(alpaca: Any, symbol: str, fallback_timeframe: str = "1Min")
     except Exception:
         pass
 
+    # Fallback: fetch 1 bar of history
     try:
         df = fetch_recent_bars(alpaca, symbol, fallback_timeframe, 1)
         if not df.empty:
@@ -136,6 +169,7 @@ def last_trade_price(alpaca: Any, symbol: str, fallback_timeframe: str = "1Min")
 
 
 def _floor_qty(cash_to_spend: float, price: float) -> int:
+    """Calculates max shares we can buy with given cash (rounding down)."""
     if cash_to_spend <= 0 or price <= 0:
         return 0
     return int(math.floor(cash_to_spend / price))
@@ -147,6 +181,10 @@ def _floor_qty(cash_to_spend: float, price: float) -> int:
 
 @dataclass
 class StrategyTickContext:
+    """
+    A snapshot of the market passed to the strategy every time it wakes up.
+    Contains: current time, is market open?, when does it close?
+    """
     now_utc: datetime
     clock: Any
     is_market_open: bool
@@ -155,6 +193,7 @@ class StrategyTickContext:
 
 
 def make_tick_context(alpaca: Any) -> StrategyTickContext:
+    """Queries Alpaca API to build the current time/market context."""
     clock = alpaca.get_clock()
     is_open = bool(getattr(clock, "is_open", False))
 
@@ -177,6 +216,11 @@ def make_tick_context(alpaca: Any) -> StrategyTickContext:
 
 
 class LiveStrategy:
+    """
+    THE PARENT CLASS.
+    All trading strategies must inherit from this.
+    It sets up the common links to the Bot Config and Alpaca Connection.
+    """
     strategy_id: str
 
     def __init__(self, bot: BotConfig, alpaca: Any):
@@ -184,8 +228,21 @@ class LiveStrategy:
         self.alpaca = alpaca
         self.params = bot.strategy.params or {}
         self.symbols = list(bot.symbols or [])
+        
+        # Initialize Webhook URL from settings DB
+        self.webhook_url = None
+        try:
+            settings = db.get_user_settings(bot.user_id)
+            self.webhook_url = settings.get("discord_webhook")
+        except Exception:
+            pass
 
     def tick(self, ctx: StrategyTickContext) -> None:
+        """
+        The heartbeat of the strategy.
+        The BotRunner calls this method repeatedly (e.g., every 5 minutes).
+        Child classes MUST overwrite this with their own logic.
+        """
         raise NotImplementedError
 
 
@@ -194,6 +251,11 @@ class LiveStrategy:
 # =============================================================================
 
 class DailyMeanReversionTopLosers(LiveStrategy):
+    """
+    STRATEGY: Buy stocks that crashed yesterday.
+    Hypothesis: They were oversold and will bounce back today.
+    Action: Buy at Open, Sell at Close.
+    """
     strategy_id = "mean_reversion_losers"
 
     def __init__(self, bot: BotConfig, alpaca: Any):
@@ -203,6 +265,7 @@ class DailyMeanReversionTopLosers(LiveStrategy):
         self._last_trade_day: Optional[date] = None
 
     def _already_traded_today(self, now_utc: datetime) -> bool:
+        """Prevents buying the same things twice in one day."""
         d = now_utc.date()
         return self._last_trade_day == d
 
@@ -210,32 +273,31 @@ class DailyMeanReversionTopLosers(LiveStrategy):
         self._last_trade_day = now_utc.date()
 
     def _buy_losers_at_open(self) -> None:
-        # Use daily bars to compute previous-day return
+        """Logic to calculate losers and submit BUY orders."""
         rets: List[Tuple[str, float]] = []
         for sym in self.symbols:
-            # Fetch 3 days to be safe for return calc
+            # Need 3 days of data to safely calculate yesterday's return
             df = fetch_recent_bars(self.alpaca, sym, "1Day", limit=3)
             if df is None or df.empty or len(df) < 2:
                 continue
-            # close-to-close return (yesterday vs day before)
+            
+            # Calculate Return: (Yesterday Close / DayBeforeYesterday Close) - 1
             r = (float(df["close"].iloc[-1]) / float(df["close"].iloc[-2])) - 1.0
             rets.append((sym, r))
 
         if not rets:
             return
 
-        rets.sort(key=lambda x: x[1])  # worst first
+        # Sort: Smallest return (biggest loss) first
+        rets.sort(key=lambda x: x[1])  
         picked = [s for s, _ in rets[: min(self.losers_to_buy, len(rets))]]
         if not picked:
             return
 
-        # =========================================================
-        # CAPITAL FIX: Use Bot Capital Limit
-        # =========================================================
+        # Calculate Position Size (Total Capital / Number of Stocks)
         acct = self.alpaca.get_account()
         broker_cash = float(getattr(acct, "cash", 0.0))
         bot_budget = float(self.bot.capital)
-        
         usable_cash = min(bot_budget, broker_cash)
         alloc = usable_cash / float(len(picked))
 
@@ -244,19 +306,20 @@ class DailyMeanReversionTopLosers(LiveStrategy):
             return
 
         for sym in picked:
-            # SAFETY: Check for pending orders
             try:
+                # Don't buy if we already have an open order
                 existing = self.alpaca.list_orders(status="open", symbols=[sym])
                 if existing: continue
             except: pass
 
-            # NOTIONAL BUY
             px = last_trade_price(self.alpaca, sym, fallback_timeframe="1Min")
             if px:
                 print(f"BUYING LOSER: {sym} for ${alloc:.2f}")
-                msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym}"
                 print(msg)
                 if self.webhook_url: send_discord(self.webhook_url, msg)
+                
+                # Submit Market Order using 'notional' (dollar amount)
                 self.alpaca.submit_order(
                     symbol=sym, 
                     notional=alloc, 
@@ -266,7 +329,7 @@ class DailyMeanReversionTopLosers(LiveStrategy):
                 )
 
     def close_all_at_day_end(self) -> None:
-        # Close all positions (MVP: close only symbols in bot universe)
+        """Panic Button: Sell EVERYTHING associated with this bot."""
         try:
             positions = self.alpaca.list_positions()
         except Exception:
@@ -276,21 +339,21 @@ class DailyMeanReversionTopLosers(LiveStrategy):
             if sym and (not self.symbols or sym in self.symbols):
                 qty = int(float(getattr(p, "qty", 0)))
                 if qty > 0:
-                    msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                    msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (End of Day)"
                     print(msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
 
     def tick(self, ctx: StrategyTickContext) -> None:
+        """Main Loop: Runs periodically."""
         if not ctx.is_market_open:
             return
 
-        # 1. Entry Logic (Only once per day)
+        # 1. Entry Logic (Run once per day)
         if not self._already_traded_today(ctx.now_utc):
             self._buy_losers_at_open()
             self._mark_traded_today(ctx.now_utc)
 
-        # 2. Stop Loss Monitoring (Runs every tick)
-        # Even though this strategy holds til close, a stop loss is a good safety net.
+        # 2. Stop Loss Monitoring (Runs continuously)
         try:
             positions = self.alpaca.list_positions()
             for p in positions:
@@ -303,9 +366,9 @@ class DailyMeanReversionTopLosers(LiveStrategy):
 
                 if qty > 0 and avg_entry > 0:
                     pct_change = (current_price - avg_entry) / avg_entry
+                    stop_pct = float(self.params.get("stop_loss_pct", 0.03)) 
                     
-                    # Stop Loss Check
-                    stop_pct = float(self.params.get("stop_loss_pct", 0.03)) # Default 3%
+                    # If lost more than X%, sell immediately
                     if stop_pct > 0 and pct_change <= -stop_pct:
                         print(f"STOP LOSS (Losers): {sym} down {pct_change:.2%}")
                         msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
@@ -321,6 +384,11 @@ class DailyMeanReversionTopLosers(LiveStrategy):
 # =============================================================================
 
 class MovingAverageTrend(LiveStrategy):
+    """
+    STRATEGY: Golden Cross / Death Cross.
+    Buy when Short MA crosses above Long MA.
+    Sell when Short MA crosses below Long MA.
+    """
     strategy_id = "moving_average"
 
     def __init__(self, bot: BotConfig, alpaca: Any):
@@ -336,27 +404,25 @@ class MovingAverageTrend(LiveStrategy):
         self._last_bar_ts: Dict[str, datetime] = {}
 
     def _ma(self, s: pd.Series, period: int) -> pd.Series:
+        """Calculates SMA or EMA."""
         if self.ma_type == "EMA":
             return s.ewm(span=period, adjust=False).mean()
         return s.rolling(window=period, min_periods=period).mean()
 
     def tick(self, ctx: StrategyTickContext) -> None:
-        #Check market open 
         if not ctx.is_market_open:
            return
 
         for sym in self.symbols:
-            # 1. Fetch Data
+            # 1. Fetch Data (Enough to cover the long period)
             df = fetch_recent_bars(self.alpaca, sym, self.timeframe, limit=max(self.long_p + 5, 60))
             if df is None or df.empty or len(df) < self.long_p + 1:
                 continue
 
             bar_ts = df.index[-1].to_pydatetime()
-            # if self._last_bar_ts.get(sym) == bar_ts:
-            #     continue
             self._last_bar_ts[sym] = bar_ts
 
-            # 2. Indicators
+            # 2. Compute Indicators
             close = df["close"].astype(float)
             s_ma = self._ma(close, self.short_p).iloc[-1]
             l_ma = self._ma(close, self.long_p).iloc[-1]
@@ -364,14 +430,12 @@ class MovingAverageTrend(LiveStrategy):
                 continue
             price = float(close.iloc[-1])
 
-            # 3. Position & Pending Check
+            # 3. Check Account Status
             qty = 0
             avg_entry = 0.0
             try:
                 existing = self.alpaca.list_orders(status="open", symbols=[sym])
-                if existing:
-                    print(f"DEBUG: Skipping {sym} (Pending Order)")
-                    continue
+                if existing: continue
 
                 pos = self.alpaca.get_position(sym)
                 qty = float(getattr(pos, "qty", 0))
@@ -379,57 +443,53 @@ class MovingAverageTrend(LiveStrategy):
             except Exception:
                 pass
 
-            # 4. Stop Loss / Take Profit
+            # 4. Risk Management (Stop Loss / Take Profit)
             if qty > 0 and avg_entry > 0:
                 pct_change = (price - avg_entry) / avg_entry
                 
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
                     print(f"STOP LOSS: {sym} {pct_change:.2%}")
                     msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
-                    print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
                 
                 if self.take_profit > 0 and pct_change >= self.take_profit:
                     print(f"TAKE PROFIT: {sym} {pct_change:.2%}")
-                    msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
-                    print(msg)
+                    msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
                     if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
 
-            # 5. Entry / Exit Logic
-            # Buy if Short MA > Long MA (Golden Cross or Trend)
+            # 5. Trading Logic
+            # BUY: Short MA > Long MA
             if qty == 0 and float(s_ma) > float(l_ma):
-                # Capital Logic
                 acct = self.alpaca.get_account()
                 broker_cash = float(getattr(acct, "cash", 0.0))
                 bot_budget = float(self.bot.capital)
                 usable_cash = min(bot_budget, broker_cash)
-                
                 alloc = usable_cash / max(1, len(self.symbols))
                 
                 if alloc >= 1.0:
-                    print(f"BUYING (MA): {sym} for ${alloc:.2f}")
-                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym}"
                     print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, notional=alloc, side="buy", type="market", time_in_force="day")
 
-            # Sell if Short MA < Long MA (Death Cross)
+            # SELL: Short MA < Long MA
             elif qty > 0 and float(s_ma) < float(l_ma):
-                print(f"SELLING (MA): {sym}")
-                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym}"
                 print(msg)
                 if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
+
 
 # =============================================================================
 # Strategy 3: RSI Mean Reversion
 # =============================================================================
 
 def _rsi(close: pd.Series, period: int) -> pd.Series:
+    """Standard RSI calculation."""
     delta = close.diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
@@ -441,6 +501,9 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
 
 
 class RSIMeanReversion(LiveStrategy):
+    """
+    STRATEGY: Buy Low (Oversold), Sell High (Overbought).
+    """
     strategy_id = "rsi_reversion"
 
     def __init__(self, bot: BotConfig, alpaca: Any):
@@ -452,16 +515,9 @@ class RSIMeanReversion(LiveStrategy):
         self.stop_loss = float(self.params.get("stop_loss_pct", 0.0) or 0.0)
         self.take_profit = float(self.params.get("take_profit_pct", 0.0) or 0.0)
         self._last_bar_ts: Dict[str, datetime] = {}
-    # --- GET DISCORD WEBHOOK ---
-        self.webhook_url = None
-        try:
-            settings = db.get_user_settings(bot.user_id)
-            self.webhook_url = settings.get("discord_webhook")
-        except Exception:
-            pass
 
     def tick(self, ctx: StrategyTickContext) -> None:
-        # Check market open (Uncomment for real trading)
+        # NOTE: Commented out for testing, usually uncomment for production
         # if not ctx.is_market_open:
         #    return
 
@@ -471,111 +527,76 @@ class RSIMeanReversion(LiveStrategy):
             if df is None or df.empty or len(df) < self.period + 1:
                 continue
 
-            # 2. Duplicate Data Check
-            bar_ts = df.index[-1].to_pydatetime()
-            # if self._last_bar_ts.get(sym) == bar_ts:
-            #     continue
-            self._last_bar_ts[sym] = bar_ts
+            self._last_bar_ts[sym] = df.index[-1].to_pydatetime()
 
-            # 3. Calculate Indicators
+            # 2. Calc RSI
             close = df["close"].astype(float)
             price = float(close.iloc[-1])
             rsi = _rsi(close, self.period).iloc[-1]
             if pd.isna(rsi):
                 continue
 
-            # 4. Check Position & Pending Orders
+            # 3. Check Holdings
             qty = 0
             avg_entry = 0.0
             try:
-                # Check for OPEN orders (waiting to fill)
                 existing_orders = self.alpaca.list_orders(status="open", symbols=[sym])
-                if existing_orders:
-                    print(f"DEBUG: Skipping {sym} (Pending Order Exists)")
-                    continue
+                if existing_orders: continue
                 
-                # Check for CURRENT Position
                 pos = self.alpaca.get_position(sym)
                 qty = float(getattr(pos, "qty", 0))
                 avg_entry = float(getattr(pos, "avg_entry_price", 0.0))
             except Exception:
                 pass
 
-            # =========================================================
-            # STOP LOSS & TAKE PROFIT (Soft Check)
-            # =========================================================
-            # If we own stock (qty > 0), check if we need to emergency sell
+            # 4. Risk Checks
             if qty > 0 and avg_entry > 0:
-                # Calc percentage change
                 pct_change = (price - avg_entry) / avg_entry
-                
-                # 1. STOP LOSS (e.g., -0.03 for 3% loss)
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
-                    print(f"STOP LOSS TRIGGERED: {sym} dropped {pct_change:.2%}")
                     msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
-                    print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
-                    self.alpaca.submit_order(
-                        symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
-                    )
-                    continue # Stop here, don't buy again immediately
-
-                # 2. TAKE PROFIT (e.g., +0.05 for 5% gain)
-                if self.take_profit > 0 and pct_change >= self.take_profit:
-                    print(f"TAKE PROFIT TRIGGERED: {sym} rose {pct_change:.2%}")
-                    msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
-                    print(msg)
-                    if self.webhook_url: send_discord(self.webhook_url, msg)
-                    self.alpaca.submit_order(
-                        symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
-                    )
+                    self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
 
-            # =========================================================
-            # BUY LOGIC (Notional / Dollar Amount)
-            # =========================================================
+                if self.take_profit > 0 and pct_change >= self.take_profit:
+                    msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
+                    if self.webhook_url: send_discord(self.webhook_url, msg)
+                    self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
+                    continue
+
+            # 5. Logic
+            # Buy if RSI <= Oversold (e.g. 30)
             if qty == 0 and float(rsi) <= self.oversold:
                 acct = self.alpaca.get_account()
                 broker_cash = float(getattr(acct, "cash", 0.0))
-                
-                # Limit usage to Bot Capital
                 bot_budget = float(self.bot.capital)
                 usable_cash = min(bot_budget, broker_cash)
-                
-                # Allocation
                 alloc = usable_cash / max(1, len(self.symbols))
                 
-                # Buy if we have at least $1
                 if alloc >= 1.0:
-                    print(f"BUYING: {sym} for ${alloc:.2f} (Notional)")
                     msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
                     print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
-                    self.alpaca.submit_order(
-                        symbol=sym, 
-                        notional=alloc,   # <--- Buying Dollars
-                        side="buy", 
-                        type="market", 
-                        time_in_force="day"
-                    )
+                    self.alpaca.submit_order(symbol=sym, notional=alloc, side="buy", type="market", time_in_force="day")
 
-            # =========================================================
-            # STRATEGY EXIT (RSI becomes Overbought)
-            # =========================================================
+            # Sell if RSI >= Overbought (e.g. 70)
             elif qty > 0 and float(rsi) >= self.overbought:
-                print(f"SELLING: {sym} (RSI Overbought)")
                 msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
                 print(msg)
                 if self.webhook_url: send_discord(self.webhook_url, msg)
-                self.alpaca.submit_order(
-                    symbol=sym, qty=qty, side="sell", type="market", time_in_force="day"
-                )
+                self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
+
 
 # =============================================================================
 # Strategy 4: MACD Trend
 # =============================================================================
 
 class MACDTrend(LiveStrategy):
+    """
+    STRATEGY: MACD Crossover.
+    Buy when MACD Line > Signal Line (Upward momentum).
+    Sell when MACD Line < Signal Line (Downward momentum).
+    """
     strategy_id = "macd_trend"
 
     def __init__(self, bot: BotConfig, alpaca: Any):
@@ -592,7 +613,6 @@ class MACDTrend(LiveStrategy):
         self._prev_rel: Dict[str, Optional[float]] = {}
 
     def tick(self, ctx: StrategyTickContext) -> None:
-        # Check market open 
         if not ctx.is_market_open:
             return
 
@@ -602,104 +622,86 @@ class MACDTrend(LiveStrategy):
             if df is None or df.empty or len(df) < self.slow + self.signal + 5:
                 continue
 
-            # 2. Duplicate Data Check
-            bar_ts = df.index[-1].to_pydatetime()
-            # if self._last_bar_ts.get(sym) == bar_ts:
-            #     continue
-            self._last_bar_ts[sym] = bar_ts
+            self._last_bar_ts[sym] = df.index[-1].to_pydatetime()
 
-            # 3. Calculate MACD
+            # 2. Calc MACD
             close = df["close"].astype(float)
             ema_fast = close.ewm(span=self.fast, adjust=False).mean()
             ema_slow = close.ewm(span=self.slow, adjust=False).mean()
             macd = ema_fast - ema_slow
             sig = macd.ewm(span=self.signal, adjust=False).mean()
             
-            # rel > 0 means MACD is above Signal (Bullish)
+            # Rel = MACD - Signal
+            # Rel > 0 means Bullish. Rel < 0 means Bearish.
             rel = float(macd.iloc[-1] - sig.iloc[-1])
             prev = self._prev_rel.get(sym)
             self._prev_rel[sym] = rel
             
-            if prev is None:
-                continue
+            if prev is None: continue
             
             price = float(close.iloc[-1])
 
-            # 4. Check Position & Pending Orders
+            # 3. Check Holdings
             qty = 0
             avg_entry = 0.0
             try:
-                # SAFETY: Check for Open Orders first
                 existing = self.alpaca.list_orders(status="open", symbols=[sym])
-                if existing:
-                    print(f"DEBUG: Skipping {sym} (Pending Order)")
-                    continue
-
+                if existing: continue
                 pos = self.alpaca.get_position(sym)
                 qty = float(getattr(pos, "qty", 0))
                 avg_entry = float(getattr(pos, "avg_entry_price", 0.0))
             except Exception:
                 pass
 
-            # 5. Stop Loss / Take Profit (Runs if we own stock)
+            # 4. Risk Checks
             if qty > 0 and avg_entry > 0:
                 pct_change = (price - avg_entry) / avg_entry
-                
                 if self.stop_loss > 0 and pct_change <= -self.stop_loss:
-                    print(f"STOP LOSS (MACD): {sym} {pct_change:.2%}")
                     msg = f"🛑 STOP LOSS: Bot {self.bot.name} sold {sym} (Down {pct_change:.2%})"
-                    print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
-                
                 if self.take_profit > 0 and pct_change >= self.take_profit:
-                    print(f"TAKE PROFIT (MACD): {sym} {pct_change:.2%}")
                     msg = f"💰 TAKE PROFIT: Bot {self.bot.name} sold {sym} (Up {pct_change:.2%})"
-                    print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
                     self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
                     continue
 
-            # 6. Entry Logic (Golden Cross)
+            # 5. Logic
+            # Crossover Up (Yesterday negative, today positive)
             crossed_up = (prev <= 0) and (rel > 0)
+            # Crossover Down (Yesterday positive, today negative)
             crossed_down = (prev >= 0) and (rel < 0)
 
             if qty == 0 and crossed_up:
-                # Capital Logic
                 acct = self.alpaca.get_account()
                 broker_cash = float(getattr(acct, "cash", 0.0))
                 bot_budget = float(self.bot.capital)
-                
                 usable_cash = min(bot_budget, broker_cash)
                 alloc = usable_cash / max(1, len(self.symbols))
                 
                 if alloc >= 1.0:
-                    print(f"BUYING (MACD): {sym} for ${alloc:.2f}")
-                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym} (RSI {float(rsi):.1f})"
+                    msg = f"🚀 BUY SIGNAL: Bot {self.bot.name} buying ${alloc:.2f} of {sym}"
                     print(msg)
                     if self.webhook_url: send_discord(self.webhook_url, msg)
-                    self.alpaca.submit_order(
-                        symbol=sym, 
-                        notional=alloc,  # <--- Buying Dollars
-                        side="buy", 
-                        type="market", 
-                        time_in_force="day"
-                    )
+                    self.alpaca.submit_order(symbol=sym, notional=alloc, side="buy", type="market", time_in_force="day")
 
-            # 7. Exit Logic (Death Cross)
             elif qty > 0 and crossed_down:
-                print(f"SELLING (MACD): {sym} (Crossover)")
-                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym} (RSI {float(rsi):.1f})"
+                msg = f"📉 SELL SIGNAL: Bot {self.bot.name} selling {qty} {sym}"
                 print(msg)
                 if self.webhook_url: send_discord(self.webhook_url, msg)
                 self.alpaca.submit_order(symbol=sym, qty=qty, side="sell", type="market", time_in_force="day")
+
 
 # =============================================================================
 # Factory
 # =============================================================================
 
 def build_live_strategy(bot: BotConfig, alpaca: Any) -> LiveStrategy:
+    """
+    Factory Function:
+    Takes a Bot Configuration and returns the correct Strategy Class instance.
+    """
     sid = bot.strategy.strategy_id
     if sid == "mean_reversion_losers":
         return DailyMeanReversionTopLosers(bot, alpaca)

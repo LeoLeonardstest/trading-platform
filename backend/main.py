@@ -1,4 +1,16 @@
-# backend/main.py
+"""backend/main.py
+
+FILE OVERVIEW:
+This file is the entry point for the FastAPI server.
+It listens for HTTP requests (like Login, Start Bot, Get History) from the Desktop Client.
+
+Key Endpoints:
+- /auth/*: Login and Registration.
+- /bots/*: Create, Start, Stop, Delete bots.
+- /settings: Save API keys.
+- /dashboard: Get account summary.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,15 +28,16 @@ from backend import db
 from backend.bot_runner import BotRunner
 from backend.alpaca import make_alpaca_client
 
-# init DB + runner
+# Initialize DB tables and Bot Runner engine
 db.init_db()
 runner = BotRunner()
 
 app = FastAPI(title="Trading Platform Backend", version="0.2")
 
+# Allow the desktop app (local) to talk to this server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later (domain/desktop app only)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,14 +49,16 @@ app.add_middleware(
 # -------------------------
 
 def _hash_password(password: str, salt: str) -> str:
-    # MVP hash. Upgrade later to bcrypt/argon2.
+    """Basic SHA256 hashing."""
     return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
 
 def _make_password_hash(password: str) -> str:
+    """Generates a salt and hashes the password."""
     salt = secrets.token_hex(16)
     return f"{salt}${_hash_password(password, salt)}"
 
 def _verify_password(password: str, password_hash: str) -> bool:
+    """Compares input password to stored hash."""
     try:
         salt, h = password_hash.split("$", 1)
     except Exception:
@@ -52,6 +67,11 @@ def _verify_password(password: str, password_hash: str) -> bool:
 
 
 def get_current_user_id(authorization: Optional[str] = Header(default=None)) -> str:
+    """
+    FastAPI Dependency.
+    Checks the 'Authorization' header for a valid Token.
+    Returns the User ID if valid, else 401 Error.
+    """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -62,7 +82,7 @@ def get_current_user_id(authorization: Optional[str] = Header(default=None)) -> 
 
 
 # -------------------------
-# Request/Response models
+# Request/Response models (Pydantic)
 # -------------------------
 
 class RegisterReq(BaseModel):
@@ -115,6 +135,7 @@ class BotResp(BaseModel):
 
 @app.post("/auth/register", response_model=AuthResp)
 def register(req: RegisterReq):
+    """Creates a new user."""
     existing = db.get_user_by_username(req.username)
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -131,6 +152,7 @@ def register(req: RegisterReq):
 
 @app.post("/auth/login", response_model=AuthResp)
 def login(req: LoginReq):
+    """Logs in and returns a token."""
     user = db.get_user_by_username(req.username)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -150,11 +172,13 @@ def login(req: LoginReq):
 
 @app.get("/settings")
 def get_settings(user_id: str = Depends(get_current_user_id)):
+    """Fetches API keys."""
     return db.get_user_settings(user_id)
 
 
 @app.post("/settings")
 def set_settings(req: SettingsReq, user_id: str = Depends(get_current_user_id)):
+    """Updates API keys."""
     db.upsert_user_settings(
         user_id=user_id,
         alpaca_key_id=req.alpaca_key_id,
@@ -164,7 +188,6 @@ def set_settings(req: SettingsReq, user_id: str = Depends(get_current_user_id)):
     )
     return {"ok": True}
 
-# Backwards-compatible alias for the desktop client
 @app.post("/settings/update")
 def set_settings_alias(req: SettingsReq, user_id: str = Depends(get_current_user_id)):
     return set_settings(req, user_id)
@@ -176,6 +199,7 @@ def set_settings_alias(req: SettingsReq, user_id: str = Depends(get_current_user
 
 @app.get("/bots", response_model=list[BotResp])
 def list_bots(user_id: str = Depends(get_current_user_id)):
+    """Returns all bots for the user."""
     rows = db.list_bots_for_user(user_id)
     out = []
     for r in rows:
@@ -197,6 +221,7 @@ def list_bots(user_id: str = Depends(get_current_user_id)):
 
 @app.post("/bots/start")
 def start_bot(req: BotStartReq, user_id: str = Depends(get_current_user_id)):
+    """Creates configuration in DB and starts the bot thread."""
     bot_id = str(uuid4())
     db.create_bot(
         bot_id=bot_id,
@@ -219,6 +244,7 @@ def start_bot(req: BotStartReq, user_id: str = Depends(get_current_user_id)):
 
 @app.post("/bots/stop")
 def stop_bot(req: StopBotReq, user_id: str = Depends(get_current_user_id)):
+    """Stops the bot thread."""
     bot = db.get_bot(req.bot_id)
     if not bot or bot["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -229,6 +255,7 @@ def stop_bot(req: StopBotReq, user_id: str = Depends(get_current_user_id)):
 
 @app.get("/bots/status")
 def bot_status(bot_id: str, user_id: str = Depends(get_current_user_id)):
+    """Returns live status."""
     bot = db.get_bot(bot_id)
     if not bot or bot["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -242,40 +269,37 @@ def bot_status(bot_id: str, user_id: str = Depends(get_current_user_id)):
 
 @app.post("/bots/restart")
 def restart_bot(req: RestartBotReq, user_id: str = Depends(get_current_user_id)):
-    # 1. Get the bot from the database
+    """Restarts a stopped bot."""
     bot_row = db.get_bot(req.bot_id)
     if not bot_row or bot_row["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    # 2. Check if it's already running to avoid duplicates
     if runner.is_running(req.bot_id):
         raise HTTPException(status_code=400, detail="Bot is already running")
 
-    # 3. Start the bot again using the saved settings
     runner.start_bot(bot_row)
-    
     return {"ok": True, "bot_id": req.bot_id}
 
 
 @app.post("/bots/delete")
 def delete_bot_endpoint(req: StopBotReq, user_id: str = Depends(get_current_user_id)):
+    """Stops and deletes a bot."""
     bot = db.get_bot(req.bot_id)
     if not bot or bot["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    # 1. Stop the bot if it is running
     runner.stop_bot(req.bot_id)
-    
-    # 2. Delete it from the database
     db.delete_bot(req.bot_id)
-    
     return {"ok": True}
+
+
 # -------------------------
 # History endpoints
 # -------------------------
 
 @app.get("/history")
 def history(bot_id: Optional[str] = None, user_id: str = Depends(get_current_user_id)):
+    """Returns past trades."""
     return db.list_trades_for_user(user_id, bot_id=bot_id)
 
 
@@ -286,9 +310,8 @@ def history(bot_id: Optional[str] = None, user_id: str = Depends(get_current_use
 @app.get("/dashboard")
 def dashboard(user_id: str = Depends(get_current_user_id)):
     """
-    MVP dashboard:
-    - returns Alpaca account fields (paper) if credentials exist
-    - returns bot list summary
+    Returns Account Balance and Active Bot count.
+    Connects to Alpaca to get real-time cash balance.
     """
     settings = db.get_user_settings(user_id)
     alpaca_key = settings.get("alpaca_key_id")

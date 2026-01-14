@@ -1,16 +1,10 @@
 """
 shared/models.py
 
-Core domain models for the trading platform.
-These models define the LANGUAGE of the system.
-
-Rules:
-- No business logic
-- No database code
-- No API calls
-- Plain data structures only
-
-Everything else (DB, backend, bots, UI) depends on these models.
+FILE OVERVIEW:
+This file defines the Data Structures (Models) used throughout the system.
+It defines what a "User", "Bot", or "Trade" looks like.
+Using these classes ensures the Frontend and Backend speak the same language.
 """
 
 from __future__ import annotations
@@ -22,10 +16,11 @@ from datetime import datetime
 
 
 # ==================================================
-# Enums
+# Enums (Fixed Options)
 # ==================================================
 
 class BotStatus(Enum):
+    """Possible states for a bot."""
     CREATED = "CREATED"
     RUNNING = "RUNNING"
     SLEEPING = "SLEEPING"
@@ -34,6 +29,7 @@ class BotStatus(Enum):
 
 
 class OrderSide(Enum):
+    """Buy or Sell."""
     BUY = "BUY"
     SELL = "SELL"
 
@@ -46,7 +42,7 @@ class OrderSide(Enum):
 class User:
     """
     Represents a platform user.
-    Owns bots and provides broker credentials.
+    Stores login info and API keys.
     """
     user_id: str
     username: str
@@ -70,24 +66,23 @@ ParamValue = Union[float, int, str, bool]
 @dataclass
 class StrategyConfig:
     """
-    Strategy-specific configuration.
-
-    - strategy_id identifies which predefined strategy is used
-    - params contains ONLY parameters relevant to that strategy
+    Specific settings for a strategy logic.
+    Example: { strategy_id: "rsi", params: { "rsi_period": 14 } }
     """
     strategy_id: str
     params: Dict[str, ParamValue] = field(default_factory=dict)
 
 
 # ==================================================
-# Bot Configuration (fixed at creation)
+# Bot Configuration
 # ==================================================
 
 @dataclass
 class BotConfig:
     """
-    Immutable configuration of a bot.
-    Does NOT change while the bot is running.
+    Configuration for a Bot Instance.
+    This includes its name, which strategy it uses, which symbols it trades,
+    and how much money is assigned to it.
     """
     bot_id: str
     user_id: str
@@ -110,8 +105,8 @@ class BotConfig:
 @dataclass
 class Trade:
     """
-    Represents a single executed trade (MVP: order submission record).
-    Used for history and performance tracking.
+    Represents a single executed trade.
+    Used for History and Backtesting results.
     """
     trade_id: str
     bot_id: str

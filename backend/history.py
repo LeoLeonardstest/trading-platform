@@ -1,4 +1,10 @@
-# backend/history.py
+"""backend/history.py
+
+FILE OVERVIEW:
+A helper module to record trade submissions to the database.
+It abstracts the database insertion logic from the trading logic.
+"""
+
 from __future__ import annotations
 
 import json
@@ -19,10 +25,9 @@ def record_order_submission(
     meta: Optional[dict] = None,
 ) -> None:
     """
-    MVP approach:
-    - record immediately when order is submitted (not guaranteed fill price)
-    Later upgrade:
-    - poll Alpaca orders/activities and record actual fills.
+    Records that an order was SENT to Alpaca.
+    Note: Ideally we would wait for a "Fill" event, but for this MVP 
+    we record it as soon as the bot decides to buy/sell.
     """
     db.insert_trade(
         trade_id=str(uuid4()),

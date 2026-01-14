@@ -1,27 +1,13 @@
 """shared/strategy_specs.py
 
-Minimal shared strategy metadata.
+FILE OVERVIEW:
+This file defines the **Metadata** for all strategies.
+It tells the UI:
+1. What strategies are available.
+2. What parameters (inputs) they require.
+3. Default values and validation rules for those parameters.
 
-Purpose:
-- Single source of truth for:
-  - Strategy IDs and names
-  - Strategy descriptions (UI text)
-  - Allowed parameters, ranges, defaults, examples
-  - Symbol list rules (e.g., Mean Reversion universe 20–50)
-
-This file is intentionally simple:
-- plain dictionaries
-- no classes
-- no Alpaca code
-- no database code
-
-Used by:
-- UI (render fields + examples)
-- Backtest runner (validate config)
-- Live bot runner (validate config)
-
-Parameter key naming rule:
-- The keys defined here MUST match what your live/backtest strategies read.
+It is a "Single Source of Truth". The UI reads this file to build the input forms dynamically.
 """
 
 from __future__ import annotations
@@ -50,41 +36,41 @@ TIMEFRAMES: List[str] = [
 
 
 # -----------------------------
-# TypedDicts (optional typing help; safe to ignore)
+# TypedDicts (Used for type hinting)
 # -----------------------------
 
 ParamType = Literal["int", "float", "str", "bool"]
 
 
 class ParamSpec(TypedDict, total=False):
-    type: ParamType
-    description: str
+    """Defines a single input field (e.g. 'Stop Loss')."""
+    type: ParamType      # Data type: int, float, str, bool
+    description: str     # Help text for the user
     required: bool
 
-    default: object
+    default: object      # Default value
     example: object
 
-    min: float
-    max: float
+    min: float           # Minimum allowed value
+    max: float           # Maximum allowed value
 
-    allowed: List[object]
+    allowed: List[object] # Dropdown options (if applicable)
 
 
 class StrategySpec(TypedDict):
+    """Defines the full configuration for a Strategy."""
     id: str
-    name: str
+    name: str            # Display name in UI
     description: str
 
-    # How to interpret BotConfig.symbols for this strategy
-    # - "universe": symbols is the universe from which the strategy selects
-    # - "symbols": symbols are the traded symbols
+    # "universe" = strategy picks from a list. "symbols" = strategy trades the list directly.
     symbols_role: Literal["universe", "symbols"]
 
-    # symbol list constraints
+    # Symbol count limits
     min_symbols: int
     max_symbols: Optional[int]
 
-    params: Dict[str, ParamSpec]
+    params: Dict[str, ParamSpec] # Dictionary of all parameters
 
 
 # -----------------------------
@@ -92,6 +78,7 @@ class StrategySpec(TypedDict):
 # -----------------------------
 
 STRATEGY_SPECS: Dict[str, StrategySpec] = {
+    # 1. Mean Reversion
     "mean_reversion_losers": {
         "id": "mean_reversion_losers",
         "name": "Daily Mean Reversion — Top Losers",
@@ -103,7 +90,6 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         "min_symbols": 20,
         "max_symbols": 50,
         "params": {
-            # Universe size is derived from len(symbols). Do NOT store universe_size separately.
             "losers_to_buy": {
                 "type": "int",
                 "description": "How many of the worst-performing stocks to buy each day.",
@@ -140,6 +126,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         },
     },
 
+    # 2. Moving Average
     "moving_average": {
         "id": "moving_average",
         "name": "Moving Average Trend (SMA / EMA)",
@@ -206,6 +193,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         },
     },
 
+    # 3. RSI
     "rsi_reversion": {
         "id": "rsi_reversion",
         "name": "RSI Mean Reversion",
@@ -273,6 +261,7 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
         },
     },
 
+    # 4. MACD
     "macd_trend": {
         "id": "macd_trend",
         "name": "MACD Trend / Reversal",
@@ -343,10 +332,12 @@ STRATEGY_SPECS: Dict[str, StrategySpec] = {
 
 
 def list_strategy_ids() -> List[str]:
+    """Returns a list of all strategy IDs (keys)."""
     return sorted(STRATEGY_SPECS.keys())
 
 
 def get_spec(strategy_id: str) -> StrategySpec:
+    """Returns the configuration specification for a single strategy."""
     if strategy_id not in STRATEGY_SPECS:
         raise KeyError(f"Unknown strategy_id: {strategy_id}")
     return STRATEGY_SPECS[strategy_id]

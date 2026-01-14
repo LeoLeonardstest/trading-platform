@@ -1,4 +1,10 @@
-# backend/alpaca.py
+"""backend/alpaca.py
+
+FILE OVERVIEW:
+This module initializes the connection to the Alpaca Broker API.
+It allows us to fetch data, check account balance, and place orders.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -15,6 +21,7 @@ DEFAULT_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.market
 
 
 def _require_alpaca() -> None:
+    """Ensures the library is installed."""
     if tradeapi is None:
         raise RuntimeError(
             "alpaca-trade-api is not installed. Add it to requirements.txt and install:\n"
@@ -28,7 +35,8 @@ def make_alpaca_client(
     base_url: Optional[str] = None,
 ) -> Any:
     """
-    Returns an alpaca_trade_api.REST client.
+    Creates and returns an authenticated Alpaca REST client.
+    Used by the BotRunner to execute trades.
     """
     _require_alpaca()
     return tradeapi.REST(
