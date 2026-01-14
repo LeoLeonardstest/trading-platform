@@ -634,54 +634,68 @@ class MainLayout(tk.Frame):
         self.refresh_bot_list()
 
     def _render_bot_params(self):
-        # Clear existing
+        # 1. Clear existing fields
         for w in self.bot_params_frame.winfo_children():
             w.destroy()
         
         self.bot_param_entries = {}
         sid = self.bot_strategy.get().strip()
 
-        # Define fields based on strategy
+        # 2. Define fields based on strategy (Label, Key, Default, Recommendation/Help Text)
         specs = []
+        
         if sid == "mean_reversion_losers":
             specs = [
-                ("losers_to_buy", "Losers Count", "5"),
-                ("timeframe", "Timeframe", "1D"),
-                ("stop_loss_pct", "Stop Loss %", "0.03")
-            ]
-        elif sid == "moving_average":
-            specs = [
-                ("ma_type", "Type (SMA/EMA)", "SMA"),
-                ("short_period", "Short Period", "20"),
-                ("long_period", "Long Period", "50"),
-                ("timeframe", "Timeframe", "5Min")
-            ]
-        elif sid == "rsi_reversion":
-            specs = [
-                ("rsi_period", "RSI Period", "14"),
-                ("oversold", "Oversold", "30"),
-                ("overbought", "Overbought", "70"),
-                ("timeframe", "Timeframe", "15Min")
-            ]
-        elif sid == "macd_trend":
-            specs = [
-                ("fast_period", "Fast", "12"),
-                ("slow_period", "Slow", "26"),
-                ("signal_period", "Signal", "9"),
-                ("timeframe", "Timeframe", "30Min")
+                ("Losers Count", "losers_to_buy", "5", "How many stocks to buy (Rec: 5-10)"),
+                ("Timeframe", "timeframe", "1D", "Must be '1D' for this strategy"),
+                ("Stop Loss %", "stop_loss_pct", "0.03", "0.03 = 3% loss triggers exit (0 to disable)"),
             ]
         
-        # Draw fields
-        for i, (key, label, default) in enumerate(specs):
-            f = tk.Frame(self.bot_params_frame)
-            f.pack(side=tk.LEFT, padx=10, pady=5)
-            tk.Label(f, text=label).pack(anchor="w")
-            ent = tk.Entry(f, width=10)
+        elif sid == "moving_average":
+            specs = [
+                ("MA Type", "ma_type", "SMA", "SMA or EMA"),
+                ("Short Period", "short_period", "20", "Fast moving average (Rec: 10-50)"),
+                ("Long Period", "long_period", "50", "Slow moving average (Rec: 50-200)"),
+                ("Timeframe", "timeframe", "5Min", "Bar size (e.g. 5Min, 1Hour)"),
+                ("Stop Loss %", "stop_loss_pct", "0.02", "0.02 = 2% max loss"),
+                ("Take Profit %", "take_profit_pct", "0.06", "0.06 = 6% target profit"),
+            ]
+        
+        elif sid == "rsi_reversion":
+            specs = [
+                ("RSI Period", "rsi_period", "14", "Standard is 14"),
+                ("Oversold", "oversold", "30", "Buy level (Rec: 30 or lower)"),
+                ("Overbought", "overbought", "70", "Sell level (Rec: 70 or higher)"),
+                ("Timeframe", "timeframe", "15Min", "Bar size (e.g. 15Min, 1Hour)"),
+                ("Stop Loss %", "stop_loss_pct", "0.03", "0.03 = 3% max loss"),
+                ("Take Profit %", "take_profit_pct", "0.05", "0.05 = 5% target profit"),
+            ]
+        
+        elif sid == "macd_trend":
+            specs = [
+                ("Fast Period", "fast_period", "12", "Standard: 12"),
+                ("Slow Period", "slow_period", "26", "Standard: 26"),
+                ("Signal Period", "signal_period", "9", "Standard: 9"),
+                ("Timeframe", "timeframe", "30Min", "Bar size (e.g. 30Min, 1Hour)"),
+                ("Stop Loss %", "stop_loss_pct", "0.02", "0.02 = 2% max loss"),
+                ("Take Profit %", "take_profit_pct", "0.06", "0.06 = 6% target profit"),
+            ]
+        
+        # 3. Draw the grid
+        for i, (label_text, key, default, help_text) in enumerate(specs):
+            # Label
+            tk.Label(self.bot_params_frame, text=label_text + ":", font=("Arial", 9, "bold")).grid(row=i, column=0, sticky="e", padx=5, pady=2)
+            
+            # Entry Field
+            ent = tk.Entry(self.bot_params_frame, width=15)
             ent.insert(0, default)
-            ent.pack()
+            ent.grid(row=i, column=1, sticky="w", padx=5, pady=2)
             self.bot_param_entries[key] = ent
-
-    # --- ACTION HANDLERS ---
+            
+            # Help Text (Gray)
+            tk.Label(self.bot_params_frame, text=help_text, fg="gray", font=("Arial", 8)).grid(row=i, column=2, sticky="w", padx=10)
+   
+   # --- ACTION HANDLERS ---
 
     def on_start_bot(self):
         try:

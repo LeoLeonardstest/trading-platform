@@ -94,6 +94,9 @@ class BotStartReq(BaseModel):
 class StopBotReq(BaseModel):
     bot_id: str
 
+class RestartBotReq(BaseModel):
+    bot_id: str
+    
 class BotResp(BaseModel):
     bot_id: str
     name: str

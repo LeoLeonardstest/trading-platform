@@ -194,16 +194,16 @@ class BotRunner:
                 ctx = make_tick_context(alpaca)
 
                 # Outside market hours: sleep until next open (but remain stoppable).
-                if not ctx.is_market_open:
-                    db.update_bot_status(bot_id, "sleeping")
-                    if ctx.next_open_utc and ctx.now_utc:
-                        sleep_s = max(30.0, (ctx.next_open_utc - ctx.now_utc).total_seconds())
-                        # cap sleep so stop requests are responsive
-                        sleep_s = min(sleep_s, 15 * 60.0)
-                    else:
-                        sleep_s = 15 * 60.0
-                    stop_event.wait(timeout=sleep_s)
-                    continue
+#               if not ctx.is_market_open:
+ #                   db.update_bot_status(bot_id, "sleeping")
+  #                  if ctx.next_open_utc and ctx.now_utc:
+   #                     sleep_s = max(30.0, (ctx.next_open_utc - ctx.now_utc).total_seconds())
+    #                    # cap sleep so stop requests are responsive
+     #                   sleep_s = min(sleep_s, 15 * 60.0)
+      #              else:
+       #                 sleep_s = 15 * 60.0
+        #            stop_event.wait(timeout=sleep_s)
+         #           continue
 
                 # Market is open
                 db.update_bot_status(bot_id, "running")
