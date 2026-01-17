@@ -517,9 +517,9 @@ class RSIMeanReversion(LiveStrategy):
         self._last_bar_ts: Dict[str, datetime] = {}
 
     def tick(self, ctx: StrategyTickContext) -> None:
-        # NOTE: Commented out for testing, usually uncomment for production
-        # if not ctx.is_market_open:
-        #    return
+        
+        if not ctx.is_market_open:
+            return
 
         for sym in self.symbols:
             # 1. Fetch Data

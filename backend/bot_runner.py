@@ -218,18 +218,17 @@ class BotRunner:
                 # Get current market status (Open/Closed)
                 ctx = make_tick_context(alpaca)
 
-                # NOTE: Logic to sleep when market is closed is commented out here, 
-                # but typically you would uncomment it to save resources.
-#               if not ctx.is_market_open:
- #                   db.update_bot_status(bot_id, "sleeping")
-  #                  if ctx.next_open_utc and ctx.now_utc:
-   #                     sleep_s = max(30.0, (ctx.next_open_utc - ctx.now_utc).total_seconds())
-    #                    # cap sleep so stop requests are responsive
-     #                   sleep_s = min(sleep_s, 15 * 60.0)
-      #              else:
-       #                 sleep_s = 15 * 60.0
-        #            stop_event.wait(timeout=sleep_s)
-         #           continue
+                # Check Market Open
+                if not ctx.is_market_open:
+                    db.update_bot_status(bot_id, "sleeping")
+                    if ctx.next_open_utc and ctx.now_utc:
+                        sleep_s = max(30.0, (ctx.next_open_utc - ctx.now_utc).total_seconds())
+                        # cap sleep so stop requests are responsive
+                        sleep_s = min(sleep_s, 15 * 60.0)
+                    else:
+                        sleep_s = 15 * 60.0
+                    stop_event.wait(timeout=sleep_s)
+                    continue
 
                 db.update_bot_status(bot_id, "running")
 
